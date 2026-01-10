@@ -1,0 +1,9 @@
+flask
+gunicorn
+weasyprint
+pandas
+openpyxl
+reportlab
+matplotlib
+requests
+beautifulsoup4
