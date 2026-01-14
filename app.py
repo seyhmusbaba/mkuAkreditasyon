@@ -6,6 +6,7 @@ from pathlib import Path
 from flask import Flask, request, send_file, Response, redirect, jsonify, make_response
 import json
 import urllib.parse
+import sys
 from uuid import uuid4
 from datetime import datetime
 
@@ -780,16 +781,155 @@ def admin_update_department_info():
 @app.route("/api/department-courses/<dept_id>/<semester>", methods=["GET"])
 def api_department_courses(dept_id, semester):
     """Bölüme ve yarıyıla göre ders listesi getir"""
-    # Şimdilik sadece siyaset_bilimi için sabit liste döndür
-    # İleride her bölümün kendi ders listesi Bologna'dan çekilebilir
-    courses_json = auth.get_courses_json()
-    import json
     try:
-        all_courses = json.loads(courses_json)
-        courses = all_courses.get(str(semester), [])
-        return jsonify({"courses": courses})
+        semester_num = int(semester)
+        courses = auth.get_department_courses(dept_id, semester_num)
+        
+        # Frontend için format
+        formatted = []
+        for c in courses:
+            formatted.append({
+                'code': c.get('course_code', ''),
+                'name': c.get('course_name', ''),
+                'akts': c.get('akts', 5),
+                'type': c.get('course_type', 'Z')
+            })
+        
+        return jsonify({"courses": formatted, "department_id": dept_id, "semester": semester_num})
+    except Exception as e:
+        print(f"api_department_courses error: {e}", file=sys.stderr)
+        return jsonify({"courses": [], "error": str(e)})
+
+
+@app.route("/api/department-courses/<dept_id>", methods=["GET"])
+def api_all_department_courses(dept_id):
+    """Bölümün tüm derslerini getir"""
+    try:
+        courses = auth.get_department_courses(dept_id)
+        
+        # Yarıyıla göre grupla
+        by_semester = {}
+        for c in courses:
+            sem = c.get('semester', 1)
+            if sem not in by_semester:
+                by_semester[sem] = []
+            by_semester[sem].append({
+                'code': c.get('course_code', ''),
+                'name': c.get('course_name', ''),
+                'akts': c.get('akts', 5),
+                'type': c.get('course_type', 'Z'),
+                'bologna_link': c.get('bologna_link', '')
+            })
+        
+        return jsonify({"courses": by_semester, "department_id": dept_id, "total": len(courses)})
+    except Exception as e:
+        print(f"api_all_department_courses error: {e}", file=sys.stderr)
+        return jsonify({"courses": {}, "error": str(e)})
+
+
+@app.route("/admin/add-course", methods=["POST"])
+def admin_add_course():
+    """Bölüme yeni ders ekle"""
+    if not _is_auth() or not _is_admin():
+        return jsonify({"error": "Yetkisiz"}), 403
+    
+    dept_id = request.form.get("dept_id", "")
+    course_code = request.form.get("course_code", "").strip()
+    course_name = request.form.get("course_name", "").strip()
+    semester = request.form.get("semester", "1")
+    akts = request.form.get("akts", "5")
+    course_type = request.form.get("course_type", "Z")
+    bologna_link = request.form.get("bologna_link", "").strip()
+    
+    if not dept_id or not course_code or not course_name:
+        return jsonify({"error": "Bölüm, ders kodu ve adı zorunlu"}), 400
+    
+    try:
+        semester_num = int(semester)
+        akts_num = int(akts)
     except:
-        return jsonify({"courses": []})
+        semester_num = 1
+        akts_num = 5
+    
+    email = _get_email()
+    success = auth.add_course(dept_id, course_code, course_name, semester_num, akts_num, course_type, bologna_link, email)
+    
+    if success:
+        return jsonify({"success": True})
+    else:
+        return jsonify({"error": "Bu ders kodu zaten mevcut"}), 400
+
+
+@app.route("/admin/update-course", methods=["POST"])
+def admin_update_course():
+    """Ders bilgilerini güncelle"""
+    if not _is_auth() or not _is_admin():
+        return jsonify({"error": "Yetkisiz"}), 403
+    
+    course_code = request.form.get("course_code", "")
+    course_name = request.form.get("course_name", "").strip()
+    semester = request.form.get("semester", "")
+    akts = request.form.get("akts", "")
+    course_type = request.form.get("course_type", "")
+    bologna_link = request.form.get("bologna_link", "")
+    
+    if not course_code:
+        return jsonify({"error": "Ders kodu zorunlu"}), 400
+    
+    email = _get_email()
+    
+    # None değerleri atlayarak güncelle
+    success = auth.update_course(
+        course_code,
+        course_name if course_name else None,
+        int(semester) if semester else None,
+        int(akts) if akts else None,
+        course_type if course_type else None,
+        bologna_link if bologna_link is not None else None,
+        email
+    )
+    
+    if success:
+        return jsonify({"success": True})
+    else:
+        return jsonify({"error": "Güncelleme başarısız"}), 500
+
+
+@app.route("/admin/delete-course", methods=["POST"])
+def admin_delete_course():
+    """Dersi sil"""
+    if not _is_auth() or not _is_admin():
+        return jsonify({"error": "Yetkisiz"}), 403
+    
+    course_code = request.form.get("course_code", "")
+    
+    if not course_code:
+        return jsonify({"error": "Ders kodu zorunlu"}), 400
+    
+    success = auth.delete_course(course_code)
+    
+    if success:
+        return jsonify({"success": True})
+    else:
+        return jsonify({"error": "Silme başarısız"}), 500
+
+
+@app.route("/admin/fetch-courses-from-bologna", methods=["POST"])
+def admin_fetch_courses_from_bologna():
+    """Bologna'dan ders listesi çek"""
+    if not _is_auth() or not _is_admin():
+        return jsonify({"error": "Yetkisiz"}), 403
+    
+    dept_id = request.form.get("dept_id", "")
+    url = request.form.get("url", "").strip()
+    
+    if not dept_id or not url:
+        return jsonify({"error": "Bölüm ID ve URL zorunlu"}), 400
+    
+    email = _get_email()
+    result = auth.fetch_courses_from_bologna(url, dept_id, email)
+    
+    return jsonify(result)
 
 
 # ============ KULLANICI-DERS YÖNETİMİ ============
