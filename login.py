@@ -529,6 +529,19 @@ def init_db():
     # Varsayılan ders verilerini ekle (tüm dersler için)
     _init_course_data(conn)
     
+    # Varsayılan bölümü departments tablosuna ekle (yoksa)
+    cur = conn.execute("SELECT department_id FROM departments WHERE department_id=?", ("siyaset_bilimi",))
+    if not cur.fetchone():
+        conn.execute("""INSERT INTO departments 
+            (department_id, name, faculty, bologna_courses_url, bologna_pea_url, bologna_poc_url, updated_by)
+            VALUES (?,?,?,?,?,?,?)""",
+            ("siyaset_bilimi", "Siyaset Bilimi ve Kamu Yönetimi", "İktisadi ve İdari Bilimler Fakültesi",
+             "https://obs.mku.edu.tr/oibs/bologna/progCourses.aspx?curCourse=1403&lang=tr",
+             "https://obs.mku.edu.tr/oibs/bologna/progGoalsObjectives.aspx?curCourse=1403&lang=tr",
+             "https://obs.mku.edu.tr/oibs/bologna/progLearnOutcomes.aspx?curCourse=1403&lang=tr",
+             "system"))
+        conn.commit()
+    
     conn.close()
 
 
@@ -811,6 +824,41 @@ def get_all_departments() -> list:
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def update_department(dept_id: str, name: str, faculty: str, bologna_courses_url: str, bologna_pea_url: str, bologna_poc_url: str, updated_by: str) -> bool:
+    """Bölüm bilgilerini güncelle"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("""UPDATE departments SET 
+            name=?, faculty=?, bologna_courses_url=?, bologna_pea_url=?, bologna_poc_url=?, updated_by=?
+            WHERE department_id=?""",
+            (name, faculty, bologna_courses_url, bologna_pea_url, bologna_poc_url, updated_by, dept_id))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"update_department error: {e}")
+        conn.close()
+        return False
+
+
+def delete_department(dept_id: str) -> bool:
+    """Bölümü sil"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        # Varsayılan bölümü silme
+        if dept_id == "siyaset_bilimi":
+            conn.close()
+            return False
+        conn.execute("DELETE FROM departments WHERE department_id=?", (dept_id,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"delete_department error: {e}")
+        conn.close()
+        return False
 
 
 def fetch_pea_from_bologna(url: str) -> dict:
@@ -1375,6 +1423,20 @@ def render_signup(error_block: str = "") -> str:
     pea_data = get_pea_text().replace('\n', '\\n').replace("'", "\\'")
     poc_data = get_poc_text().replace('\n', '\\n').replace("'", "\\'")
     
+    # Dinamik bölüm listesi
+    departments = get_all_departments()
+    dept_options = ""
+    for dept in departments:
+        dept_id = dept.get('department_id', '')
+        dept_name = dept.get('name', '')
+        dept_faculty = dept.get('faculty', '')
+        selected = "selected" if dept_id == "siyaset_bilimi" else ""
+        dept_options += f'<option value="{dept_id}" data-faculty="{dept_faculty}" {selected}>{dept_name}</option>'
+    
+    # Bölüm yoksa varsayılan ekle
+    if not dept_options:
+        dept_options = '<option value="siyaset_bilimi" data-faculty="İktisadi ve İdari Bilimler Fakültesi" selected>Siyaset Bilimi ve Kamu Yönetimi</option>'
+    
     return f"""<!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -1478,13 +1540,13 @@ def render_signup(error_block: str = "") -> str:
           
           <div class="form-group">
             <label>Fakülte</label>
-            <input type="text" value="İktisadi ve İdari Bilimler Fakültesi" readonly style="background:#f1f5f9;">
+            <input type="text" id="facultyInput" value="İktisadi ve İdari Bilimler Fakültesi" readonly style="background:#f1f5f9;">
           </div>
           
           <div class="form-group">
             <label>Bölüm</label>
-            <select name="department_id" id="departmentSelect" required>
-              <option value="siyaset_bilimi" selected>Siyaset Bilimi ve Kamu Yönetimi</option>
+            <select name="department_id" id="departmentSelect" onchange="updateFaculty()" required>
+              {dept_options}
             </select>
             <input type="hidden" name="program_name" id="programName" value="Siyaset Bilimi ve Kamu Yönetimi">
           </div>
@@ -1717,19 +1779,46 @@ def render_signup(error_block: str = "") -> str:
     
     function updateCourses() {{
       const semester = document.getElementById('semesterSelect').value;
+      const deptId = document.getElementById('departmentSelect').value;
       const courseSelect = document.getElementById('courseSelect');
-      const courses = COURSES[semester] || [];
       
-      courseSelect.innerHTML = '<option value="">-- Ders Seçin --</option>';
-      courses.forEach(c => {{
-        const opt = document.createElement('option');
-        opt.value = c.code;
-        opt.textContent = c.code + ' - ' + c.name + ' (' + c.akts + ' AKTS, ' + c.type + ')';
-        opt.dataset.name = c.name;
-        courseSelect.appendChild(opt);
-      }});
+      // Bölüme göre dersleri API'den çek
+      fetch('/api/department-courses/' + deptId + '/' + semester)
+        .then(r => r.json())
+        .then(data => {{
+          const courses = data.courses || [];
+          courseSelect.innerHTML = '<option value="">-- Ders Seçin --</option>';
+          courses.forEach(c => {{
+            const opt = document.createElement('option');
+            opt.value = c.code;
+            opt.textContent = c.code + ' - ' + c.name + ' (' + c.akts + ' AKTS, ' + c.type + ')';
+            opt.dataset.name = c.name;
+            courseSelect.appendChild(opt);
+          }});
+        }})
+        .catch(() => {{
+          // Fallback: sabit COURSES kullan
+          const courses = COURSES[semester] || [];
+          courseSelect.innerHTML = '<option value="">-- Ders Seçin --</option>';
+          courses.forEach(c => {{
+            const opt = document.createElement('option');
+            opt.value = c.code;
+            opt.textContent = c.code + ' - ' + c.name + ' (' + c.akts + ' AKTS, ' + c.type + ')';
+            opt.dataset.name = c.name;
+            courseSelect.appendChild(opt);
+          }});
+        }});
       
       updateTermInput();
+    }}
+    
+    function updateFaculty() {{
+      const deptSelect = document.getElementById('departmentSelect');
+      const selected = deptSelect.options[deptSelect.selectedIndex];
+      const faculty = selected ? selected.dataset.faculty || '' : '';
+      document.getElementById('facultyInput').value = faculty;
+      document.getElementById('programName').value = selected ? selected.textContent : '';
+      updateCourses();
     }}
     
     function updateCourseName() {{
@@ -2467,12 +2556,49 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
         dept_poc = get_department_data(dept_id).get('pocs_text', '') if dept_id else ''
         
         dept_cards += f"""
-        <div class="panel-card" style="margin-bottom:1.5rem;">
+        <div class="panel-card" style="margin-bottom:1.5rem;" id="dept-card-{dept_id}">
           <div class="panel-card-header" style="display:flex; justify-content:space-between; align-items:center;">
             <h3>📌 {dept_name}</h3>
-            <span class="badge badge-info">{dept_faculty or 'Fakülte belirtilmemiş'}</span>
+            <div style="display:flex; gap:0.5rem; align-items:center;">
+              <span class="badge badge-info">{dept_faculty or 'Fakülte belirtilmemiş'}</span>
+              <button onclick="editDepartment('{dept_id}')" class="btn-icon" title="Düzenle" style="color:#4f46e5;">✏️</button>
+              <button onclick="deleteDepartment('{dept_id}', '{dept_name}')" class="btn-icon" title="Sil" style="color:#dc2626;">🗑️</button>
+            </div>
           </div>
           <div class="panel-card-body">
+            <!-- Düzenleme formu (gizli) -->
+            <div id="edit-form-{dept_id}" style="display:none; background:#f8fafc; padding:1rem; border-radius:8px; margin-bottom:1rem;">
+              <h4 style="margin-bottom:0.75rem; color:#4f46e5;">✏️ Bölüm Bilgilerini Düzenle</h4>
+              <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem; margin-bottom:0.75rem;">
+                <div class="form-group" style="margin:0;">
+                  <label style="font-size:0.8rem;">Bölüm Adı</label>
+                  <input type="text" id="edit-name-{dept_id}" value="{dept_name}" style="width:100%;">
+                </div>
+                <div class="form-group" style="margin:0;">
+                  <label style="font-size:0.8rem;">Fakülte</label>
+                  <input type="text" id="edit-faculty-{dept_id}" value="{dept_faculty}" style="width:100%;">
+                </div>
+              </div>
+              <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:0.75rem; margin-bottom:0.75rem;">
+                <div class="form-group" style="margin:0;">
+                  <label style="font-size:0.75rem;">📚 Ders Listesi URL</label>
+                  <input type="url" id="edit-courses-url-{dept_id}" value="{bologna_courses}" style="width:100%;font-size:0.8rem;">
+                </div>
+                <div class="form-group" style="margin:0;">
+                  <label style="font-size:0.75rem;">🎯 PEA URL</label>
+                  <input type="url" id="edit-pea-url-{dept_id}" value="{bologna_pea}" style="width:100%;font-size:0.8rem;">
+                </div>
+                <div class="form-group" style="margin:0;">
+                  <label style="font-size:0.75rem;">📗 PÖÇ URL</label>
+                  <input type="url" id="edit-poc-url-{dept_id}" value="{bologna_poc}" style="width:100%;font-size:0.8rem;">
+                </div>
+              </div>
+              <div style="display:flex; gap:0.5rem;">
+                <button onclick="saveDepartmentEdit('{dept_id}')" class="btn btn-primary" style="font-size:0.85rem;">💾 Kaydet</button>
+                <button onclick="cancelDepartmentEdit('{dept_id}')" class="btn btn-secondary" style="font-size:0.85rem;">İptal</button>
+              </div>
+            </div>
+            
             <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem; margin-bottom:1rem;">
               <div>
                 <label style="font-size:0.75rem; color:#94a3b8;">📚 Ders Listesi</label>
@@ -3117,11 +3243,13 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
         .then(r => r.json())
         .then(data => {{
           if (data.success) {{
-            if (data.pea_text) {{
-              document.querySelector('[name=\"peas_text\"]').value = data.pea_text;
-            }}
-            if (data.poc_text) {{
-              document.querySelector('[name=\"pocs_text\"]').value = data.poc_text;
+            // Bu bölüme ait textarea'ları bul
+            const card = document.getElementById('dept-card-' + deptId);
+            if (card) {{
+              const peaTextarea = card.querySelector('[name="peas_text"]');
+              const pocTextarea = card.querySelector('[name="pocs_text"]');
+              if (peaTextarea && data.pea_text) peaTextarea.value = data.pea_text;
+              if (pocTextarea && data.poc_text) pocTextarea.value = data.poc_text;
             }}
             showNotification('PEA ve PÖÇ Bologna\\'dan yüklendi!', 'success');
           }} else {{
@@ -3137,6 +3265,67 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
       div.textContent = message;
       document.body.appendChild(div);
       setTimeout(() => div.remove(), 3000);
+    }}
+    
+    function deleteDepartment(deptId, deptName) {{
+      if (!confirm('Bu bölümü silmek istediğinizden emin misiniz?\\n\\nBölüm: ' + deptName + '\\n\\nBu işlem geri alınamaz!')) {{
+        return;
+      }}
+      
+      fetch('/admin/delete-department', {{
+        method: 'POST',
+        headers: {{ 'Content-Type': 'application/x-www-form-urlencoded' }},
+        body: 'dept_id=' + encodeURIComponent(deptId)
+      }}).then(r => r.json()).then(data => {{
+        if (data.success) {{
+          showNotification('Bölüm silindi!', 'success');
+          document.getElementById('dept-card-' + deptId).remove();
+        }} else {{
+          showNotification('Hata: ' + data.error, 'error');
+        }}
+      }});
+    }}
+    
+    function editDepartment(deptId) {{
+      const editForm = document.getElementById('edit-form-' + deptId);
+      if (editForm) {{
+        editForm.style.display = editForm.style.display === 'none' ? 'block' : 'none';
+      }}
+    }}
+    
+    function cancelDepartmentEdit(deptId) {{
+      const editForm = document.getElementById('edit-form-' + deptId);
+      if (editForm) {{
+        editForm.style.display = 'none';
+      }}
+    }}
+    
+    function saveDepartmentEdit(deptId) {{
+      const name = document.getElementById('edit-name-' + deptId).value;
+      const faculty = document.getElementById('edit-faculty-' + deptId).value;
+      const coursesUrl = document.getElementById('edit-courses-url-' + deptId).value;
+      const peaUrl = document.getElementById('edit-pea-url-' + deptId).value;
+      const pocUrl = document.getElementById('edit-poc-url-' + deptId).value;
+      
+      const formData = new FormData();
+      formData.append('dept_id', deptId);
+      formData.append('name', name);
+      formData.append('faculty', faculty);
+      formData.append('bologna_courses_url', coursesUrl);
+      formData.append('bologna_pea_url', peaUrl);
+      formData.append('bologna_poc_url', pocUrl);
+      
+      fetch('/admin/update-department', {{
+        method: 'POST',
+        body: formData
+      }}).then(r => r.json()).then(data => {{
+        if (data.success) {{
+          showNotification('Bölüm güncellendi!', 'success');
+          setTimeout(() => location.reload(), 1000);
+        }} else {{
+          showNotification('Hata: ' + data.error, 'error');
+        }}
+      }});
     }}
   </script>
   
