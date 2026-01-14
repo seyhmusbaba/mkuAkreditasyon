@@ -753,7 +753,7 @@ def admin_delete_department():
 
 
 @app.route("/admin/update-department", methods=["POST"])
-def admin_update_department():
+def admin_update_department_info():
     """Bölüm bilgilerini güncelle"""
     if not _is_auth() or not _is_admin():
         return jsonify({"error": "Yetkisiz"}), 403
