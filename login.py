@@ -368,6 +368,8 @@ def init_db():
         course_name TEXT,
         department_id TEXT,
         semester INTEGER,
+        akts INTEGER DEFAULT 5,
+        course_type TEXT DEFAULT 'Z',
         bologna_link TEXT,
         tyc_text TEXT,
         bloom_text TEXT,
@@ -379,6 +381,16 @@ def init_db():
         updated_at TEXT,
         updated_by TEXT
     )""")
+    
+    # akts ve course_type sütunları yoksa ekle
+    try:
+        conn.execute("ALTER TABLE course_data ADD COLUMN akts INTEGER DEFAULT 5")
+    except:
+        pass
+    try:
+        conn.execute("ALTER TABLE course_data ADD COLUMN course_type TEXT DEFAULT 'Z'")
+    except:
+        pass
     
     # Bölüm verileri (paylaşılan PEA/PÖÇ - eski sistem uyumluluğu)
     conn.execute("""CREATE TABLE IF NOT EXISTS department_data (
@@ -606,17 +618,26 @@ def _init_course_data(conn):
         "1403808": "https://obs.mku.edu.tr/oibs/bologna/progCourseDetails.aspx?curCourse=1436885&lang=tr",  # Kamu Yönetiminde Güncel Sorunlar
     }
     
-    for semester, courses in DEPARTMENT_COURSES.get("siyaset_bilimi", {}).items():
+    for semester_str, courses in DEPARTMENT_COURSES.get("siyaset_bilimi", {}).items():
+        semester_num = int(semester_str)
         for course in courses:
             code = course['code']
             cur = conn.execute("SELECT course_code FROM course_data WHERE course_code=?", (code,))
             if not cur.fetchone():
                 bologna_link = BOLOGNA_LINKS.get(code, '')
+                akts = course.get('akts', 5)
+                course_type = course.get('type', 'Z')
                 conn.execute("""INSERT INTO course_data 
-                    (course_code, course_name, bologna_link, tyc_text, bloom_text, stark_text, pea_text, poc_text, doc_text, curriculum_text, updated_by)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
-                    (code, course['name'], bologna_link,
+                    (course_code, course_name, department_id, semester, akts, course_type, bologna_link, 
+                     tyc_text, bloom_text, stark_text, pea_text, poc_text, doc_text, curriculum_text, updated_by)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (code, course['name'], 'siyaset_bilimi', semester_num, akts, course_type, bologna_link,
                      DEFAULT_TYC, DEFAULT_BLOOM, DEFAULT_STARK, peas_text, pocs_text, '', '', 'system'))
+            else:
+                # Mevcut dersin department_id ve semester bilgisini güncelle
+                conn.execute("""UPDATE course_data SET department_id=?, semester=? 
+                    WHERE course_code=? AND (department_id IS NULL OR department_id='')""",
+                    ('siyaset_bilimi', semester_num, code))
         conn.commit()
 
 
@@ -682,6 +703,186 @@ def get_all_courses_data() -> list:
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
+
+
+def get_department_courses(dept_id: str, semester: int = None) -> list:
+    """Bölüme ait dersleri getir"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    if semester:
+        cur = conn.execute("""SELECT * FROM course_data 
+            WHERE department_id=? AND semester=? 
+            ORDER BY course_code""", (dept_id, semester))
+    else:
+        cur = conn.execute("""SELECT * FROM course_data 
+            WHERE department_id=? 
+            ORDER BY semester, course_code""", (dept_id,))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+
+def add_course(dept_id: str, course_code: str, course_name: str, semester: int, 
+               akts: int = 5, course_type: str = "Z", bologna_link: str = "", updated_by: str = "") -> bool:
+    """Bölüme yeni ders ekle"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        # Bölümün PEA/PÖÇ verilerini al
+        dept_data = get_department_data(dept_id)
+        peas_text = dept_data.get('peas_text', '')
+        pocs_text = dept_data.get('pocs_text', '')
+        
+        conn.execute("""INSERT INTO course_data 
+            (course_code, course_name, department_id, semester, akts, course_type, bologna_link, 
+             tyc_text, bloom_text, stark_text, pea_text, poc_text, doc_text, curriculum_text, updated_by)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (course_code, course_name, dept_id, semester, akts, course_type, bologna_link,
+             DEFAULT_TYC, DEFAULT_BLOOM, DEFAULT_STARK, peas_text, pocs_text, '', '', updated_by))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        conn.close()
+        return False
+    except Exception as e:
+        print(f"add_course error: {e}", file=sys.stderr)
+        conn.close()
+        return False
+
+
+def update_course(course_code: str, course_name: str = None, semester: int = None, 
+                  akts: int = None, course_type: str = None, bologna_link: str = None, updated_by: str = "") -> bool:
+    """Ders bilgilerini güncelle"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        updates = []
+        params = []
+        
+        if course_name is not None:
+            updates.append("course_name=?")
+            params.append(course_name)
+        if semester is not None:
+            updates.append("semester=?")
+            params.append(semester)
+        if akts is not None:
+            updates.append("akts=?")
+            params.append(akts)
+        if course_type is not None:
+            updates.append("course_type=?")
+            params.append(course_type)
+        if bologna_link is not None:
+            updates.append("bologna_link=?")
+            params.append(bologna_link)
+        
+        if updates:
+            updates.append("updated_at=CURRENT_TIMESTAMP")
+            updates.append("updated_by=?")
+            params.append(updated_by)
+            params.append(course_code)
+            
+            sql = f"UPDATE course_data SET {', '.join(updates)} WHERE course_code=?"
+            conn.execute(sql, params)
+            conn.commit()
+        
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"update_course error: {e}", file=sys.stderr)
+        conn.close()
+        return False
+
+
+def delete_course(course_code: str) -> bool:
+    """Dersi sil"""
+    conn = sqlite3.connect(DB_PATH)
+    try:
+        conn.execute("DELETE FROM course_data WHERE course_code=?", (course_code,))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"delete_course error: {e}", file=sys.stderr)
+        conn.close()
+        return False
+
+
+def fetch_courses_from_bologna(url: str, dept_id: str, updated_by: str = "") -> dict:
+    """Bologna'dan ders listesi çek ve veritabanına ekle"""
+    if not HAS_SCRAPING or not url:
+        return {"success": False, "error": "URL boş veya scraping modülü yüklü değil", "courses": []}
+    
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        courses = []
+        tables = soup.find_all('table')
+        
+        for table in tables:
+            rows = table.find_all('tr')
+            for row in rows:
+                cells = row.find_all(['td', 'th'])
+                if len(cells) >= 4:
+                    # Tipik Bologna tablosu: Kod | Ad | AKTS | Tür
+                    code_text = cells[0].get_text(strip=True)
+                    name_text = cells[1].get_text(strip=True)
+                    
+                    # Ders kodu formatı kontrolü (örn: 1403101)
+                    if code_text and name_text and code_text[0].isdigit():
+                        akts = 5
+                        course_type = "Z"
+                        semester = 1
+                        
+                        # AKTS bulmaya çalış
+                        for cell in cells[2:]:
+                            text = cell.get_text(strip=True)
+                            if text.isdigit() and 1 <= int(text) <= 30:
+                                akts = int(text)
+                                break
+                        
+                        # Tür bulmaya çalış (Z=Zorunlu, S=Seçmeli)
+                        for cell in cells:
+                            text = cell.get_text(strip=True).upper()
+                            if text in ['Z', 'S', 'ZORUNLU', 'SEÇMELİ']:
+                                course_type = 'Z' if text in ['Z', 'ZORUNLU'] else 'S'
+                                break
+                        
+                        # Yarıyıl bulmaya çalış (ders kodundan)
+                        if len(code_text) >= 6:
+                            try:
+                                sem_digit = int(code_text[4]) if code_text[4].isdigit() else 1
+                                semester = sem_digit if 1 <= sem_digit <= 8 else 1
+                            except:
+                                pass
+                        
+                        courses.append({
+                            'code': code_text,
+                            'name': name_text,
+                            'akts': akts,
+                            'type': course_type,
+                            'semester': semester
+                        })
+        
+        # Dersleri veritabanına ekle
+        added = 0
+        for course in courses:
+            if add_course(dept_id, course['code'], course['name'], course['semester'],
+                         course['akts'], course['type'], '', updated_by):
+                added += 1
+        
+        return {
+            "success": True,
+            "courses": courses,
+            "total": len(courses),
+            "added": added
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e), "courses": []}
 
 
 def update_course_bologna_link(course_code: str, bologna_link: str, updated_by: str):
@@ -2632,8 +2833,59 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
                 <button type="button" class="btn btn-secondary" onclick="fetchPeaPocFromBologna('{dept_id}')">📥 Bologna'dan PEA/PÖÇ Çek</button>
               </div>
             </form>
+            
+            <!-- Ders Yönetimi Bölümü -->
+            <div style="border-top:1px solid #e2e8f0; margin-top:1.5rem; padding-top:1.5rem;">
+              <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;">
+                <h4 style="color:#4f46e5; margin:0;">📚 Bölüm Dersleri</h4>
+                <div style="display:flex; gap:0.5rem;">
+                  <button type="button" class="btn btn-secondary" style="font-size:0.8rem;" onclick="toggleCourseForm('{dept_id}')">➕ Ders Ekle</button>
+                  <button type="button" class="btn btn-secondary" style="font-size:0.8rem;" onclick="fetchCoursesFromBologna('{dept_id}', '{bologna_courses}')">📥 Bologna'dan Çek</button>
+                  <button type="button" class="btn btn-secondary" style="font-size:0.8rem;" onclick="loadDepartmentCourses('{dept_id}')">🔄 Yenile</button>
+                </div>
+              </div>
+              
+              <!-- Ders Ekleme Formu (Gizli) -->
+              <div id="course-form-{dept_id}" style="display:none; background:#f0fdf4; padding:1rem; border-radius:8px; margin-bottom:1rem; border:1px solid #bbf7d0;">
+                <h5 style="margin-bottom:0.75rem; color:#166534;">➕ Yeni Ders Ekle</h5>
+                <div style="display:grid; grid-template-columns:1fr 2fr 1fr 1fr; gap:0.5rem; margin-bottom:0.75rem;">
+                  <input type="text" id="new-course-code-{dept_id}" placeholder="Ders Kodu" style="padding:0.5rem; border:1px solid #e2e8f0; border-radius:6px;">
+                  <input type="text" id="new-course-name-{dept_id}" placeholder="Ders Adı" style="padding:0.5rem; border:1px solid #e2e8f0; border-radius:6px;">
+                  <select id="new-course-semester-{dept_id}" style="padding:0.5rem; border:1px solid #e2e8f0; border-radius:6px;">
+                    <option value="1">1. Yarıyıl</option>
+                    <option value="2">2. Yarıyıl</option>
+                    <option value="3">3. Yarıyıl</option>
+                    <option value="4">4. Yarıyıl</option>
+                    <option value="5">5. Yarıyıl</option>
+                    <option value="6">6. Yarıyıl</option>
+                    <option value="7">7. Yarıyıl</option>
+                    <option value="8">8. Yarıyıl</option>
+                  </select>
+                  <input type="number" id="new-course-akts-{dept_id}" placeholder="AKTS" value="5" min="1" max="30" style="padding:0.5rem; border:1px solid #e2e8f0; border-radius:6px;">
+                </div>
+                <div style="display:flex; gap:0.5rem;">
+                  <input type="url" id="new-course-link-{dept_id}" placeholder="Bologna Link (opsiyonel)" style="flex:1; padding:0.5rem; border:1px solid #e2e8f0; border-radius:6px;">
+                  <button onclick="addCourse('{dept_id}')" class="btn btn-primary" style="font-size:0.85rem;">Ekle</button>
+                  <button onclick="toggleCourseForm('{dept_id}')" class="btn btn-secondary" style="font-size:0.85rem;">İptal</button>
+                </div>
+              </div>
+              
+              <!-- Ders Listesi -->
+              <div id="courses-list-{dept_id}" style="max-height:300px; overflow-y:auto; border:1px solid #e2e8f0; border-radius:8px; background:#f8fafc;">
+                <p style="padding:1rem; color:#64748b; text-align:center;">Dersler yükleniyor...</p>
+              </div>
+            </div>
           </div>
         </div>
+        """
+        
+        # Bu bölümün derslerini yüklemek için script ekle
+        dept_cards += f"""
+        <script>
+          document.addEventListener('DOMContentLoaded', function() {{
+            loadDepartmentCourses('{dept_id}');
+          }});
+        </script>
         """
     
     return f"""<!DOCTYPE html>
@@ -3322,6 +3574,159 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
         if (data.success) {{
           showNotification('Bölüm güncellendi!', 'success');
           setTimeout(() => location.reload(), 1000);
+        }} else {{
+          showNotification('Hata: ' + data.error, 'error');
+        }}
+      }});
+    }}
+    
+    // ===== DERS YÖNETİMİ FONKSİYONLARI =====
+    
+    function toggleCourseForm(deptId) {{
+      const form = document.getElementById('course-form-' + deptId);
+      if (form) {{
+        form.style.display = form.style.display === 'none' ? 'block' : 'none';
+      }}
+    }}
+    
+    function addCourse(deptId) {{
+      const code = document.getElementById('new-course-code-' + deptId).value.trim();
+      const name = document.getElementById('new-course-name-' + deptId).value.trim();
+      const semester = document.getElementById('new-course-semester-' + deptId).value;
+      const akts = document.getElementById('new-course-akts-' + deptId).value;
+      const link = document.getElementById('new-course-link-' + deptId).value.trim();
+      
+      if (!code || !name) {{
+        showNotification('Ders kodu ve adı zorunlu!', 'error');
+        return;
+      }}
+      
+      const formData = new FormData();
+      formData.append('dept_id', deptId);
+      formData.append('course_code', code);
+      formData.append('course_name', name);
+      formData.append('semester', semester);
+      formData.append('akts', akts);
+      formData.append('course_type', 'Z');
+      formData.append('bologna_link', link);
+      
+      fetch('/admin/add-course', {{
+        method: 'POST',
+        body: formData
+      }}).then(r => r.json()).then(data => {{
+        if (data.success) {{
+          showNotification('Ders eklendi!', 'success');
+          toggleCourseForm(deptId);
+          loadDepartmentCourses(deptId);
+          // Formu temizle
+          document.getElementById('new-course-code-' + deptId).value = '';
+          document.getElementById('new-course-name-' + deptId).value = '';
+          document.getElementById('new-course-link-' + deptId).value = '';
+        }} else {{
+          showNotification('Hata: ' + data.error, 'error');
+        }}
+      }});
+    }}
+    
+    function loadDepartmentCourses(deptId) {{
+      const container = document.getElementById('courses-list-' + deptId);
+      if (!container) return;
+      
+      container.innerHTML = '<p style="padding:1rem; color:#64748b; text-align:center;">Yükleniyor...</p>';
+      
+      fetch('/api/department-courses/' + deptId)
+        .then(r => r.json())
+        .then(data => {{
+          if (data.error) {{
+            container.innerHTML = '<p style="padding:1rem; color:#dc2626;">Hata: ' + data.error + '</p>';
+            return;
+          }}
+          
+          const courses = data.courses || {{}};
+          const total = data.total || 0;
+          
+          if (total === 0) {{
+            container.innerHTML = '<p style="padding:1rem; color:#64748b; text-align:center;">Henüz ders eklenmemiş.</p>';
+            return;
+          }}
+          
+          let html = '<table style="width:100%; border-collapse:collapse; font-size:0.85rem;">';
+          html += '<thead><tr style="background:#e2e8f0;"><th style="padding:0.5rem; text-align:left;">Yarıyıl</th><th style="padding:0.5rem; text-align:left;">Kod</th><th style="padding:0.5rem; text-align:left;">Ders Adı</th><th style="padding:0.5rem; text-align:center;">AKTS</th><th style="padding:0.5rem; text-align:center;">İşlem</th></tr></thead>';
+          html += '<tbody>';
+          
+          // Yarıyıla göre sırala
+          const semesters = Object.keys(courses).sort((a, b) => parseInt(a) - parseInt(b));
+          for (const sem of semesters) {{
+            const semCourses = courses[sem];
+            for (const c of semCourses) {{
+              html += '<tr style="border-bottom:1px solid #e2e8f0;">';
+              html += '<td style="padding:0.5rem;">' + sem + '. Yarıyıl</td>';
+              html += '<td style="padding:0.5rem; font-weight:600;">' + c.code + '</td>';
+              html += '<td style="padding:0.5rem;">' + c.name + '</td>';
+              html += '<td style="padding:0.5rem; text-align:center;">' + c.akts + '</td>';
+              html += '<td style="padding:0.5rem; text-align:center;">';
+              html += '<button onclick="deleteCourseFromDept(\\'' + c.code + '\\', \\'' + deptId + '\\')" class="btn-icon" title="Sil" style="color:#dc2626; border:none; background:none; cursor:pointer;">🗑️</button>';
+              html += '</td>';
+              html += '</tr>';
+            }}
+          }}
+          
+          html += '</tbody></table>';
+          html += '<p style="padding:0.5rem; font-size:0.75rem; color:#64748b; text-align:right;">Toplam: ' + total + ' ders</p>';
+          
+          container.innerHTML = html;
+        }})
+        .catch(err => {{
+          container.innerHTML = '<p style="padding:1rem; color:#dc2626;">Bağlantı hatası</p>';
+        }});
+    }}
+    
+    function fetchCoursesFromBologna(deptId, url) {{
+      if (!url) {{
+        showNotification('Bologna ders listesi URL\\'si tanımlı değil!', 'error');
+        return;
+      }}
+      
+      if (!confirm('Bologna\\'dan ders listesi çekilecek. Bu işlem mevcut dersleri etkilemez, sadece yeni dersler ekler. Devam?')) {{
+        return;
+      }}
+      
+      showNotification('Bologna\\'dan dersler çekiliyor...', 'info');
+      
+      const formData = new FormData();
+      formData.append('dept_id', deptId);
+      formData.append('url', url);
+      
+      fetch('/admin/fetch-courses-from-bologna', {{
+        method: 'POST',
+        body: formData
+      }}).then(r => r.json()).then(data => {{
+        if (data.success) {{
+          showNotification('Toplam ' + data.total + ' ders bulundu, ' + data.added + ' yeni ders eklendi!', 'success');
+          loadDepartmentCourses(deptId);
+        }} else {{
+          showNotification('Hata: ' + (data.error || 'Dersler çekilemedi'), 'error');
+        }}
+      }}).catch(err => {{
+        showNotification('Bağlantı hatası!', 'error');
+      }});
+    }}
+    
+    function deleteCourseFromDept(courseCode, deptId) {{
+      if (!confirm('Bu dersi silmek istediğinizden emin misiniz?\\n\\nDers Kodu: ' + courseCode)) {{
+        return;
+      }}
+      
+      const formData = new FormData();
+      formData.append('course_code', courseCode);
+      
+      fetch('/admin/delete-course', {{
+        method: 'POST',
+        body: formData
+      }}).then(r => r.json()).then(data => {{
+        if (data.success) {{
+          showNotification('Ders silindi!', 'success');
+          loadDepartmentCourses(deptId);
         }} else {{
           showNotification('Hata: ' + data.error, 'error');
         }}
