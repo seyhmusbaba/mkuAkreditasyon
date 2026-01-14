@@ -731,6 +731,67 @@ def admin_fetch_pea_poc(dept_id):
     })
 
 
+@app.route("/admin/delete-department", methods=["POST"])
+def admin_delete_department():
+    """Bölümü sil"""
+    if not _is_auth() or not _is_admin():
+        return jsonify({"error": "Yetkisiz"}), 403
+    
+    dept_id = request.form.get("dept_id", "")
+    
+    if not dept_id:
+        return jsonify({"error": "Bölüm ID zorunlu"}), 400
+    
+    if dept_id == "siyaset_bilimi":
+        return jsonify({"error": "Varsayılan bölüm silinemez"}), 400
+    
+    success = auth.delete_department(dept_id)
+    if success:
+        return jsonify({"success": True})
+    else:
+        return jsonify({"error": "Bölüm silinemedi"}), 500
+
+
+@app.route("/admin/update-department", methods=["POST"])
+def admin_update_department():
+    """Bölüm bilgilerini güncelle"""
+    if not _is_auth() or not _is_admin():
+        return jsonify({"error": "Yetkisiz"}), 403
+    
+    dept_id = request.form.get("dept_id", "")
+    name = request.form.get("name", "").strip()
+    faculty = request.form.get("faculty", "").strip()
+    bologna_courses_url = request.form.get("bologna_courses_url", "").strip()
+    bologna_pea_url = request.form.get("bologna_pea_url", "").strip()
+    bologna_poc_url = request.form.get("bologna_poc_url", "").strip()
+    
+    if not dept_id or not name:
+        return jsonify({"error": "Bölüm ID ve adı zorunlu"}), 400
+    
+    email = _get_email()
+    success = auth.update_department(dept_id, name, faculty, bologna_courses_url, bologna_pea_url, bologna_poc_url, email)
+    
+    if success:
+        return jsonify({"success": True})
+    else:
+        return jsonify({"error": "Güncelleme başarısız"}), 500
+
+
+@app.route("/api/department-courses/<dept_id>/<semester>", methods=["GET"])
+def api_department_courses(dept_id, semester):
+    """Bölüme ve yarıyıla göre ders listesi getir"""
+    # Şimdilik sadece siyaset_bilimi için sabit liste döndür
+    # İleride her bölümün kendi ders listesi Bologna'dan çekilebilir
+    courses_json = auth.get_courses_json()
+    import json
+    try:
+        all_courses = json.loads(courses_json)
+        courses = all_courses.get(str(semester), [])
+        return jsonify({"courses": courses})
+    except:
+        return jsonify({"courses": []})
+
+
 # ============ KULLANICI-DERS YÖNETİMİ ============
 
 @app.route("/api/user-courses", methods=["GET"])
