@@ -436,8 +436,20 @@ def init_db():
         payload TEXT NOT NULL,
         result TEXT NOT NULL,
         overall_pct REAL,
+        department_id TEXT,
+        course_code TEXT,
         created_at TEXT DEFAULT CURRENT_TIMESTAMP
     )""")
+    
+    # report_history'ye department_id ve course_code ekle (mevcut tablolar için)
+    try:
+        conn.execute("ALTER TABLE report_history ADD COLUMN department_id TEXT")
+    except:
+        pass
+    try:
+        conn.execute("ALTER TABLE report_history ADD COLUMN course_code TEXT")
+    except:
+        pass
     
     # Kullanıcı Müfredat Verileri tablosu
     conn.execute("""CREATE TABLE IF NOT EXISTS user_curriculum (
@@ -554,6 +566,17 @@ def init_db():
              "system"))
         conn.commit()
     
+    # departments ve department_data senkronizasyonu:
+    # departments'taki her bölüm için department_data'da kayıt yoksa oluştur
+    cur = conn.execute("SELECT department_id FROM departments")
+    all_depts = [row[0] for row in cur.fetchall()]
+    for dept_id in all_depts:
+        cur2 = conn.execute("SELECT department_id FROM department_data WHERE department_id=?", (dept_id,))
+        if not cur2.fetchone():
+            conn.execute("""INSERT INTO department_data (department_id, peas_text, pocs_text, updated_by)
+                VALUES (?,?,?,?)""", (dept_id, '', '', 'system'))
+    conn.commit()
+    
     conn.close()
 
 
@@ -622,11 +645,17 @@ def _init_course_data(conn):
         semester_num = int(semester_str)
         for course in courses:
             code = course['code']
+            akts = course.get('akts', 5)
+            course_type = course.get('type', 'Zorunlu')
+            # Type kısaltma
+            if course_type in ['Zorunlu', 'Z']:
+                course_type = 'Z'
+            elif course_type in ['Seçmeli', 'S']:
+                course_type = 'S'
+            
             cur = conn.execute("SELECT course_code FROM course_data WHERE course_code=?", (code,))
             if not cur.fetchone():
                 bologna_link = BOLOGNA_LINKS.get(code, '')
-                akts = course.get('akts', 5)
-                course_type = course.get('type', 'Z')
                 conn.execute("""INSERT INTO course_data 
                     (course_code, course_name, department_id, semester, akts, course_type, bologna_link, 
                      tyc_text, bloom_text, stark_text, pea_text, poc_text, doc_text, curriculum_text, updated_by)
@@ -634,10 +663,14 @@ def _init_course_data(conn):
                     (code, course['name'], 'siyaset_bilimi', semester_num, akts, course_type, bologna_link,
                      DEFAULT_TYC, DEFAULT_BLOOM, DEFAULT_STARK, peas_text, pocs_text, '', '', 'system'))
             else:
-                # Mevcut dersin department_id ve semester bilgisini güncelle
-                conn.execute("""UPDATE course_data SET department_id=?, semester=? 
-                    WHERE course_code=? AND (department_id IS NULL OR department_id='')""",
-                    ('siyaset_bilimi', semester_num, code))
+                # Mevcut dersin department_id, semester, akts, course_type bilgisini güncelle
+                conn.execute("""UPDATE course_data SET 
+                    department_id = COALESCE(NULLIF(department_id, ''), ?),
+                    semester = COALESCE(semester, ?),
+                    akts = COALESCE(akts, ?),
+                    course_type = COALESCE(NULLIF(course_type, ''), ?)
+                    WHERE course_code=?""",
+                    ('siyaset_bilimi', semester_num, akts, course_type, code))
         conn.commit()
 
 
@@ -645,33 +678,21 @@ def _init_course_data(conn):
 
 def get_course_data(course_code: str) -> dict:
     """Ders bazlı verileri getir"""
-    import sys
-    print(f"[get_course_data] course_code: {course_code}", file=sys.stderr, flush=True)
-    
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.execute("SELECT * FROM course_data WHERE course_code=?", (course_code,))
     row = cur.fetchone()
     conn.close()
-    
-    result = dict(row) if row else {}
-    print(f"[get_course_data] bulundu: {bool(row)}, tyc_len: {len(result.get('tyc_text',''))}, doc_len: {len(result.get('doc_text',''))}", file=sys.stderr, flush=True)
-    return result
+    return dict(row) if row else {}
 
 
 def save_course_data(course_code: str, data: dict, updated_by: str):
     """Ders bazlı verileri kaydet"""
-    import sys
-    print(f"[save_course_data] course_code: {course_code}, updated_by: {updated_by}", file=sys.stderr, flush=True)
-    print(f"[save_course_data] tyc_text: {len(data.get('tyc_text',''))} chars", file=sys.stderr, flush=True)
-    print(f"[save_course_data] doc_text: {len(data.get('doc_text',''))} chars", file=sys.stderr, flush=True)
-    
     conn = sqlite3.connect(DB_PATH)
     cur = conn.execute("SELECT course_code FROM course_data WHERE course_code=?", (course_code,))
     
     if cur.fetchone():
-        print(f"[save_course_data] UPDATE yapılıyor", file=sys.stderr, flush=True)
-        cur2 = conn.execute("""UPDATE course_data SET 
+        conn.execute("""UPDATE course_data SET 
             course_name=?, bologna_link=?, tyc_text=?, bloom_text=?, stark_text=?, 
             pea_text=?, poc_text=?, doc_text=?, curriculum_text=?, updated_at=CURRENT_TIMESTAMP, updated_by=?
             WHERE course_code=?""",
@@ -679,9 +700,7 @@ def save_course_data(course_code: str, data: dict, updated_by: str):
              data.get('tyc_text', ''), data.get('bloom_text', ''), data.get('stark_text', ''),
              data.get('pea_text', ''), data.get('poc_text', ''), data.get('doc_text', ''),
              data.get('curriculum_text', ''), updated_by, course_code))
-        print(f"[save_course_data] UPDATE rows_affected: {cur2.rowcount}", file=sys.stderr, flush=True)
     else:
-        print(f"[save_course_data] INSERT yapılıyor", file=sys.stderr, flush=True)
         conn.execute("""INSERT INTO course_data 
             (course_code, course_name, bologna_link, tyc_text, bloom_text, stark_text, pea_text, poc_text, doc_text, curriculum_text, updated_by)
             VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
@@ -692,7 +711,6 @@ def save_course_data(course_code: str, data: dict, updated_by: str):
     
     conn.commit()
     conn.close()
-    print(f"[save_course_data] Kayıt tamamlandı", file=sys.stderr, flush=True)
 
 
 def get_all_courses_data() -> list:
@@ -995,10 +1013,18 @@ def add_department(dept_id: str, name: str, faculty: str, bologna_courses_url: s
     """Yeni bölüm ekle"""
     conn = sqlite3.connect(DB_PATH)
     try:
+        # departments tablosuna ekle
         conn.execute("""INSERT INTO departments 
             (department_id, name, faculty, bologna_courses_url, bologna_pea_url, bologna_poc_url, updated_by)
             VALUES (?,?,?,?,?,?,?)""",
             (dept_id, name, faculty, bologna_courses_url, bologna_pea_url, bologna_poc_url, updated_by))
+        
+        # department_data tablosuna da boş kayıt ekle (PEA/PÖÇ için)
+        conn.execute("""INSERT OR IGNORE INTO department_data 
+            (department_id, peas_text, pocs_text, updated_by)
+            VALUES (?,?,?,?)""",
+            (dept_id, '', '', updated_by))
+        
         conn.commit()
         conn.close()
         return True
@@ -1052,7 +1078,16 @@ def delete_department(dept_id: str) -> bool:
         if dept_id == "siyaset_bilimi":
             conn.close()
             return False
+        
+        # departments tablosundan sil
         conn.execute("DELETE FROM departments WHERE department_id=?", (dept_id,))
+        
+        # department_data tablosundan da sil (varsa)
+        conn.execute("DELETE FROM department_data WHERE department_id=?", (dept_id,))
+        
+        # Bu bölümün derslerinin department_id'sini temizle (dersleri silme, sadece bağlantıyı kes)
+        conn.execute("UPDATE course_data SET department_id=NULL WHERE department_id=?", (dept_id,))
+        
         conn.commit()
         conn.close()
         return True
@@ -1129,21 +1164,12 @@ def fetch_poc_from_bologna(url: str) -> dict:
 
 
 def fetch_user(email: str):
-    import sys
-    print(f"[fetch_user] email: {email}", file=sys.stderr, flush=True)
-    
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cur = conn.execute("SELECT * FROM users WHERE email=?", (email,))
     row = cur.fetchone()
     conn.close()
-    
-    result = dict(row) if row else None
-    if result:
-        print(f"[fetch_user] bulundu, course_code: '{result.get('course_code','')}'", file=sys.stderr, flush=True)
-    else:
-        print(f"[fetch_user] BULUNAMADI!", file=sys.stderr, flush=True)
-    return result
+    return dict(row) if row else None
 
 def create_user(email: str, password: str, profile: dict):
     conn = sqlite3.connect(DB_PATH)
@@ -1296,10 +1322,10 @@ def delete_draft(draft_id: int):
     conn.close()
 
 # Rapor geçmişi
-def save_report(user_email: str, title: str, payload: str, result: str, overall_pct: float) -> int:
+def save_report(user_email: str, title: str, payload: str, result: str, overall_pct: float, department_id: str = None, course_code: str = None) -> int:
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.execute("INSERT INTO report_history (user_email, title, payload, result, overall_pct) VALUES (?,?,?,?,?)",
-                       (user_email, title, payload, result, overall_pct))
+    cur = conn.execute("INSERT INTO report_history (user_email, title, payload, result, overall_pct, department_id, course_code) VALUES (?,?,?,?,?,?,?)",
+                       (user_email, title, payload, result, overall_pct, department_id, course_code))
     report_id = cur.lastrowid
     conn.commit()
     conn.close()
@@ -1308,7 +1334,7 @@ def save_report(user_email: str, title: str, payload: str, result: str, overall_
 def get_report_history(user_email: str) -> list:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
-    cur = conn.execute("SELECT id, title, overall_pct, created_at FROM report_history WHERE user_email=? ORDER BY created_at DESC LIMIT 50", (user_email,))
+    cur = conn.execute("SELECT id, title, overall_pct, department_id, course_code, created_at FROM report_history WHERE user_email=? ORDER BY created_at DESC LIMIT 50", (user_email,))
     rows = cur.fetchall()
     conn.close()
     return [dict(r) for r in rows]
@@ -1327,15 +1353,58 @@ def delete_report(report_id: int):
     conn.commit()
     conn.close()
 
-# Yardımcı fonksiyonlar
-def get_courses_json() -> str:
-    return json.dumps(DEPARTMENT_COURSES.get("siyaset_bilimi", {}), ensure_ascii=False)
+# Yardımcı fonksiyonlar - Dinamik (veritabanından)
+def get_courses_json(dept_id: str = None) -> str:
+    """Bölümün derslerini JSON olarak getir"""
+    if not dept_id:
+        dept_id = "siyaset_bilimi"  # Varsayılan
+    
+    courses = get_department_courses(dept_id)
+    
+    # Yarıyıla göre grupla
+    by_semester = {}
+    for c in courses:
+        sem = str(c.get('semester', 1))
+        if sem not in by_semester:
+            by_semester[sem] = []
+        by_semester[sem].append({
+            'code': c.get('course_code', ''),
+            'name': c.get('course_name', ''),
+            'akts': c.get('akts', 5),
+            'type': c.get('course_type', 'Z')
+        })
+    
+    # Eğer veritabanında ders yoksa sabit listeden al (geriye uyumluluk)
+    if not by_semester and dept_id == "siyaset_bilimi":
+        return json.dumps(DEPARTMENT_COURSES.get("siyaset_bilimi", {}), ensure_ascii=False)
+    
+    return json.dumps(by_semester, ensure_ascii=False)
 
-def get_pea_text() -> str:
-    return "\n".join([f"{p['id']} | {p['text']}" for p in DEPARTMENT_PEA.get("siyaset_bilimi", [])])
+def get_pea_text(dept_id: str = None) -> str:
+    """Bölümün PEA verilerini getir"""
+    if not dept_id:
+        dept_id = "siyaset_bilimi"
+    
+    # Önce department_data'dan dene
+    dept_data = get_department_data(dept_id)
+    if dept_data.get('peas_text'):
+        return dept_data.get('peas_text', '')
+    
+    # Yoksa sabit listeden (geriye uyumluluk)
+    return "\n".join([f"{p['id']} | {p['text']}" for p in DEPARTMENT_PEA.get(dept_id, [])])
 
-def get_poc_text() -> str:
-    return "\n".join([f"{p['id']} | {p['text']}" for p in DEPARTMENT_POC.get("siyaset_bilimi", [])])
+def get_poc_text(dept_id: str = None) -> str:
+    """Bölümün PÖÇ verilerini getir"""
+    if not dept_id:
+        dept_id = "siyaset_bilimi"
+    
+    # Önce department_data'dan dene
+    dept_data = get_department_data(dept_id)
+    if dept_data.get('pocs_text'):
+        return dept_data.get('pocs_text', '')
+    
+    # Yoksa sabit listeden (geriye uyumluluk)
+    return "\n".join([f"{p['id']} | {p['text']}" for p in DEPARTMENT_POC.get(dept_id, [])])
 
 
 # Template rendering
@@ -1620,10 +1689,6 @@ def render_login(error_block: str = "") -> str:
 
 
 def render_signup(error_block: str = "") -> str:
-    courses_json = get_courses_json()
-    pea_data = get_pea_text().replace('\n', '\\n').replace("'", "\\'")
-    poc_data = get_poc_text().replace('\n', '\\n').replace("'", "\\'")
-    
     # Dinamik bölüm listesi
     departments = get_all_departments()
     dept_options = ""
@@ -1868,9 +1933,10 @@ def render_signup(error_block: str = "") -> str:
     </div>
   </div>
   <script>
-    const COURSES = {courses_json};
-    const PEA_DATA = '{pea_data}';
-    const POC_DATA = '{poc_data}';
+    // Dersler ve PEA/PÖÇ artık API'den dinamik çekiliyor
+    const COURSES = {{}};  // Geriye uyumluluk için boş
+    const PEA_DATA = '';
+    const POC_DATA = '';
     
     let currentStep = 1;
     const password = document.getElementById('password');
@@ -1983,31 +2049,29 @@ def render_signup(error_block: str = "") -> str:
       const deptId = document.getElementById('departmentSelect').value;
       const courseSelect = document.getElementById('courseSelect');
       
+      courseSelect.innerHTML = '<option value="">Yükleniyor...</option>';
+      
       // Bölüme göre dersleri API'den çek
       fetch('/api/department-courses/' + deptId + '/' + semester)
         .then(r => r.json())
         .then(data => {{
           const courses = data.courses || [];
-          courseSelect.innerHTML = '<option value="">-- Ders Seçin --</option>';
-          courses.forEach(c => {{
-            const opt = document.createElement('option');
-            opt.value = c.code;
-            opt.textContent = c.code + ' - ' + c.name + ' (' + c.akts + ' AKTS, ' + c.type + ')';
-            opt.dataset.name = c.name;
-            courseSelect.appendChild(opt);
-          }});
+          if (courses.length === 0) {{
+            courseSelect.innerHTML = '<option value="">-- Bu yarıyılda ders yok --</option>';
+          }} else {{
+            courseSelect.innerHTML = '<option value="">-- Ders Seçin --</option>';
+            courses.forEach(c => {{
+              const opt = document.createElement('option');
+              opt.value = c.code;
+              opt.textContent = c.code + ' - ' + c.name + ' (' + c.akts + ' AKTS, ' + c.type + ')';
+              opt.dataset.name = c.name;
+              courseSelect.appendChild(opt);
+            }});
+          }}
         }})
-        .catch(() => {{
-          // Fallback: sabit COURSES kullan
-          const courses = COURSES[semester] || [];
-          courseSelect.innerHTML = '<option value="">-- Ders Seçin --</option>';
-          courses.forEach(c => {{
-            const opt = document.createElement('option');
-            opt.value = c.code;
-            opt.textContent = c.code + ' - ' + c.name + ' (' + c.akts + ' AKTS, ' + c.type + ')';
-            opt.dataset.name = c.name;
-            courseSelect.appendChild(opt);
-          }});
+        .catch((err) => {{
+          console.error('Ders listesi yüklenemedi:', err);
+          courseSelect.innerHTML = '<option value="">-- Dersler yüklenemedi --</option>';
         }});
       
       updateTermInput();
@@ -2019,7 +2083,27 @@ def render_signup(error_block: str = "") -> str:
       const faculty = selected ? selected.dataset.faculty || '' : '';
       document.getElementById('facultyInput').value = faculty;
       document.getElementById('programName').value = selected ? selected.textContent : '';
+      
+      // PEA/PÖÇ verilerini de bölüme göre yükle
+      loadPeaPocForDepartment(selected ? selected.value : '');
+      
       updateCourses();
+    }}
+    
+    function loadPeaPocForDepartment(deptId) {{
+      if (!deptId) return;
+      
+      fetch('/api/department-pea-poc/' + deptId)
+        .then(r => r.json())
+        .then(data => {{
+          if (data.pea_text) {{
+            document.getElementById('peasText').value = data.pea_text;
+          }}
+          if (data.poc_text) {{
+            document.getElementById('pocsText').value = data.poc_text;
+          }}
+        }})
+        .catch(() => {{}});
     }}
     
     function updateCourseName() {{
@@ -2036,10 +2120,39 @@ def render_signup(error_block: str = "") -> str:
     }}
     
     function loadFromBologna() {{
-      document.getElementById('peasText').value = PEA_DATA;
-      document.getElementById('pocsText').value = POC_DATA;
-      document.getElementById('bolognaStatus').textContent = '✅ PEA ve PÖÇ yüklendi!';
-      document.getElementById('bolognaStatus').style.display = 'block';
+      const deptId = document.getElementById('departmentSelect').value;
+      const statusEl = document.getElementById('bolognaStatus');
+      
+      if (!deptId) {{
+        alert('Lütfen önce bölüm seçin!');
+        return;
+      }}
+      
+      statusEl.textContent = '⏳ PEA/PÖÇ yükleniyor...';
+      statusEl.style.display = 'block';
+      statusEl.style.background = '#fef3c7';
+      statusEl.style.color = '#92400e';
+      
+      fetch('/api/department-pea-poc/' + deptId)
+        .then(r => r.json())
+        .then(data => {{
+          if (data.pea_text || data.poc_text) {{
+            if (data.pea_text) document.getElementById('peasText').value = data.pea_text;
+            if (data.poc_text) document.getElementById('pocsText').value = data.poc_text;
+            statusEl.textContent = '✅ PEA ve PÖÇ yüklendi!';
+            statusEl.style.background = '#dcfce7';
+            statusEl.style.color = '#166534';
+          }} else {{
+            statusEl.textContent = '⚠️ PEA/PÖÇ verisi bulunamadı. Admin panelinden ekleyin.';
+            statusEl.style.background = '#fef2f2';
+            statusEl.style.color = '#dc2626';
+          }}
+        }})
+        .catch(() => {{
+          statusEl.textContent = '❌ Bağlantı hatası';
+          statusEl.style.background = '#fef2f2';
+          statusEl.style.color = '#dc2626';
+        }});
     }}
     
     function fetchDocFromBologna() {{
@@ -2227,17 +2340,11 @@ def update_user_role(email: str, new_role: str):
 
 def update_user_course(email: str, course_code: str, course_name: str = ""):
     """Kullanıcının aktif dersini güncelle"""
-    import sys
-    print(f"[update_user_course] email: {email}, course_code: {course_code}, course_name: {course_name}", file=sys.stderr, flush=True)
-    
     conn = sqlite3.connect(DB_PATH)
-    cur = conn.execute("UPDATE users SET course_code=?, course_name=? WHERE email=?", 
+    conn.execute("UPDATE users SET course_code=?, course_name=? WHERE email=?", 
                 (course_code, course_name, email))
-    rows_affected = cur.rowcount
     conn.commit()
     conn.close()
-    
-    print(f"[update_user_course] rows_affected: {rows_affected}", file=sys.stderr, flush=True)
 
 def delete_user(email: str):
     """Kullanıcıyı sil"""
@@ -2275,14 +2382,23 @@ def delete_user(email: str):
     finally:
         conn.close()
 
-def add_user(email: str, password: str, full_name: str, role: str, course_code: str = None, course_name: str = None):
+def add_user(email: str, password: str, full_name: str, role: str, department_id: str = None, course_code: str = None, course_name: str = None, program_name: str = None):
     """Yeni kullanıcı ekle"""
     conn = sqlite3.connect(DB_PATH)
     hashed = hash_password(password)
+    
+    # Varsayılan değerler
+    if not department_id:
+        department_id = "siyaset_bilimi"
+    if not program_name:
+        # Bölüm adını veritabanından al
+        dept = get_department(department_id)
+        program_name = dept.get('name', 'Siyaset Bilimi ve Kamu Yönetimi') if dept else 'Siyaset Bilimi ve Kamu Yönetimi'
+    
     try:
         conn.execute("""INSERT INTO users (email, password, full_name, role, department_id, course_code, course_name, program_name) 
                         VALUES (?,?,?,?,?,?,?,?)""",
-            (email, hashed, full_name, role, "siyaset_bilimi", course_code, course_name, "Siyaset Bilimi ve Kamu Yönetimi"))
+            (email, hashed, full_name, role, department_id, course_code, course_name, program_name))
         conn.commit()
         conn.close()
         return True
@@ -2310,9 +2426,11 @@ def render_profile(user: dict, message_block: str = "") -> str:
     readonly_program = '' if can_edit_program else 'readonly'
     readonly_class_program = '' if can_edit_program else 'readonly'
     
-    # Tüm dersler - admin/dekan/bb için hepsi, öğretim elemanı için yetkili olduğu dersler
+    # Tüm dersler ve bölümler
     all_courses = get_all_courses_data()
+    departments = get_all_departments()
     user_email = user.get('email', '')
+    user_dept_id = user.get('department_id', '')
     
     # Öğretim elemanı için yetkili dersleri al
     user_course_codes = []
@@ -2323,19 +2441,61 @@ def render_profile(user: dict, message_block: str = "") -> str:
         if course_code and course_code not in user_course_codes:
             user_course_codes.append(course_code)
     
+    # Dersleri bölüme göre grupla
+    courses_by_dept = {}
+    for cd in all_courses:
+        cd_dept = cd.get('department_id', 'diger') or 'diger'
+        if cd_dept not in courses_by_dept:
+            courses_by_dept[cd_dept] = []
+        courses_by_dept[cd_dept].append(cd)
+    
+    # Bölüm adlarını al
+    dept_names = {d.get('department_id'): d.get('name') for d in departments}
+    dept_names['diger'] = 'Diğer'
+    
+    # Ders seçim dropdown'ı - bölüm bazlı gruplu
     courses_select = ""
+    
     if can_edit_program:
-        # Admin/Dekan/BB tüm dersleri görebilir
-        for cd in all_courses:
-            selected = "selected" if cd.get('course_code') == course_code else ""
-            courses_select += f'<option value="{cd.get("course_code","")}" {selected}>{cd.get("course_code","")} - {cd.get("course_name","")}</option>'
+        # Admin/Dekan/BB tüm dersleri görebilir - bölümlere göre gruplu
+        for dept_id in sorted(courses_by_dept.keys(), key=lambda x: dept_names.get(x, x)):
+            dept_name = dept_names.get(dept_id, dept_id)
+            dept_courses = courses_by_dept[dept_id]
+            
+            if dept_courses:
+                courses_select += f'<optgroup label="📚 {dept_name}">'
+                # Yarıyıla göre sırala
+                dept_courses_sorted = sorted(dept_courses, key=lambda x: (x.get('semester', 0), x.get('course_code', '')))
+                for cd in dept_courses_sorted:
+                    selected = "selected" if cd.get('course_code') == course_code else ""
+                    sem = cd.get('semester', '')
+                    sem_str = f" [{sem}. YY]" if sem else ""
+                    courses_select += f'<option value="{cd.get("course_code","")}" {selected}>{cd.get("course_code","")}{sem_str} - {cd.get("course_name","")}</option>'
+                courses_select += '</optgroup>'
     else:
         # Öğretim elemanı sadece yetkili olduğu dersleri görebilir
+        user_courses_by_dept = {}
         for cd in all_courses:
             cd_code = cd.get('course_code', '')
             if cd_code in user_course_codes:
-                selected = "selected" if cd_code == course_code else ""
-                courses_select += f'<option value="{cd_code}" {selected}>{cd_code} - {cd.get("course_name","")}</option>'
+                cd_dept = cd.get('department_id', 'diger') or 'diger'
+                if cd_dept not in user_courses_by_dept:
+                    user_courses_by_dept[cd_dept] = []
+                user_courses_by_dept[cd_dept].append(cd)
+        
+        for dept_id in sorted(user_courses_by_dept.keys(), key=lambda x: dept_names.get(x, x)):
+            dept_name = dept_names.get(dept_id, dept_id)
+            dept_courses = user_courses_by_dept[dept_id]
+            
+            if dept_courses:
+                courses_select += f'<optgroup label="📚 {dept_name}">'
+                dept_courses_sorted = sorted(dept_courses, key=lambda x: (x.get('semester', 0), x.get('course_code', '')))
+                for cd in dept_courses_sorted:
+                    selected = "selected" if cd.get('course_code') == course_code else ""
+                    sem = cd.get('semester', '')
+                    sem_str = f" [{sem}. YY]" if sem else ""
+                    courses_select += f'<option value="{cd.get("course_code","")}" {selected}>{cd.get("course_code","")}{sem_str} - {cd.get("course_name","")}</option>'
+                courses_select += '</optgroup>'
         
         # Eğer hiç ders yoksa bilgi ver
         if not courses_select:
@@ -2668,10 +2828,42 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
     courses_data = get_all_courses_data()
     departments = get_all_departments()
     
-    # Ders seçenekleri (modal için)
-    course_options = ""
+    # Bölüm adlarını hazırla
+    dept_names = {d.get('department_id'): d.get('name') for d in departments}
+    dept_names['diger'] = 'Diğer'
+    dept_names[None] = 'Diğer'
+    dept_names[''] = 'Diğer'
+    
+    # Dersleri bölüme göre grupla
+    courses_by_dept = {}
     for cd in courses_data:
-        course_options += f'<option value="{cd.get("course_code","")}">{cd.get("course_code","")} - {cd.get("course_name","")}</option>'
+        cd_dept = cd.get('department_id') or 'diger'
+        if cd_dept not in courses_by_dept:
+            courses_by_dept[cd_dept] = []
+        courses_by_dept[cd_dept].append(cd)
+    
+    # Ders seçenekleri (modal için) - bölüm bazlı gruplu
+    course_options = ""
+    for dept_id in sorted(courses_by_dept.keys(), key=lambda x: dept_names.get(x, str(x))):
+        dept_name = dept_names.get(dept_id, dept_id)
+        dept_courses = sorted(courses_by_dept[dept_id], key=lambda x: (x.get('semester', 0), x.get('course_code', '')))
+        
+        if dept_courses:
+            course_options += f'<optgroup label="📚 {dept_name}">'
+            for cd in dept_courses:
+                sem = cd.get('semester', '')
+                sem_str = f" [{sem}. YY]" if sem else ""
+                course_options += f'<option value="{cd.get("course_code","")}">{cd.get("course_code","")}{sem_str} - {cd.get("course_name","")}</option>'
+            course_options += '</optgroup>'
+    
+    # Bölüm seçenekleri (kullanıcı ekleme formu için)
+    dept_select_options = ""
+    for dept in departments:
+        dept_id = dept.get('department_id', '')
+        dept_name = dept.get('name', '')
+        dept_select_options += f'<option value="{dept_id}">{dept_name}</option>'
+    if not dept_select_options:
+        dept_select_options = '<option value="siyaset_bilimi">Siyaset Bilimi ve Kamu Yönetimi</option>'
     
     # İstatistikler
     total_users = len(users)
@@ -2741,8 +2933,6 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
                 <button onclick="editCourseData('{cd.get('course_code','')}')" class="btn-icon" title="Verileri Düzenle" style="color:#4f46e5;">📝</button>
             </td>
         </tr>"""
-    
-    dept_data = get_department_data("siyaset_bilimi")
     
     # Dinamik bölüm kartları
     dept_cards = ""
@@ -3123,7 +3313,7 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
             <h3>➕ Yeni Kullanıcı Ekle</h3>
           </div>
           <div class="panel-card-body">
-            <form id="addUserForm" onsubmit="addNewUser(event)" style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr auto; gap:1rem; align-items:end;">
+            <form id="addUserForm" onsubmit="addNewUser(event)" style="display:grid; grid-template-columns:1fr 1fr 1fr 1fr 1fr auto; gap:0.75rem; align-items:end;">
               <div>
                 <label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:0.3rem;">E-posta</label>
                 <input type="email" name="email" placeholder="ornek@mku.edu.tr" required style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;border-radius:6px;color:white;font-size:0.85rem;">
@@ -3135,6 +3325,12 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
               <div>
                 <label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:0.3rem;">Şifre</label>
                 <input type="password" name="password" placeholder="Şifre" required minlength="6" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;border-radius:6px;color:white;font-size:0.85rem;">
+              </div>
+              <div>
+                <label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:0.3rem;">Bölüm</label>
+                <select name="department_id" style="width:100%;padding:0.5rem;background:#0f172a;border:1px solid #334155;border-radius:6px;color:white;font-size:0.85rem;">
+                  {dept_select_options}
+                </select>
               </div>
               <div>
                 <label style="display:block;font-size:0.75rem;color:#94a3b8;margin-bottom:0.3rem;">Rol</label>
@@ -3618,6 +3814,7 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
           showNotification('Ders eklendi!', 'success');
           toggleCourseForm(deptId);
           loadDepartmentCourses(deptId);
+          refreshCourseOptionsInModal();  // Modal'daki ders listesini güncelle
           // Formu temizle
           document.getElementById('new-course-code-' + deptId).value = '';
           document.getElementById('new-course-name-' + deptId).value = '';
@@ -3727,10 +3924,44 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
         if (data.success) {{
           showNotification('Ders silindi!', 'success');
           loadDepartmentCourses(deptId);
+          refreshCourseOptionsInModal();  // Modal'daki ders listesini güncelle
         }} else {{
           showNotification('Hata: ' + data.error, 'error');
         }}
       }});
+    }}
+    
+    // Modal'daki ders seçeneklerini API'den güncelle
+    function refreshCourseOptionsInModal() {{
+      const select = document.getElementById('assignCourseSelect');
+      if (!select) return;
+      
+      fetch('/api/all-courses')
+        .then(r => r.json())
+        .then(data => {{
+          select.innerHTML = '<option value="">Ders seçin...</option>';
+          const courses = data.courses || {{}};
+          
+          // Bölümlere göre grupla
+          Object.keys(courses).sort().forEach(deptId => {{
+            const deptCourses = courses[deptId];
+            if (deptCourses && deptCourses.length > 0) {{
+              const optgroup = document.createElement('optgroup');
+              optgroup.label = '📚 ' + (data.dept_names[deptId] || deptId);
+              
+              deptCourses.forEach(c => {{
+                const opt = document.createElement('option');
+                opt.value = c.code;
+                const semStr = c.semester ? ' [' + c.semester + '. YY]' : '';
+                opt.textContent = c.code + semStr + ' - ' + c.name;
+                optgroup.appendChild(opt);
+              }});
+              
+              select.appendChild(optgroup);
+            }}
+          }});
+        }})
+        .catch(() => {{}});
     }}
   </script>
   
@@ -3779,10 +4010,6 @@ PROFILE_HTML = ""
 
 def save_user_curriculum(email: str, data: dict):
     """Kullanıcının curriculum verilerini kaydet - mevcut verileri koruyarak güncelle"""
-    import sys
-    print(f"[save_user_curriculum] email: {email}", file=sys.stderr, flush=True)
-    print(f"[save_user_curriculum] gelen alanlar: {[k for k,v in data.items() if v]}", file=sys.stderr, flush=True)
-    
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     now = datetime.now().isoformat()
@@ -3861,7 +4088,6 @@ def save_user_curriculum(email: str, data: dict):
     ))
     conn.commit()
     conn.close()
-    print(f"[save_user_curriculum] kaydedildi - question_map: {len(final_data.get('question_map_text',''))} chars", file=sys.stderr, flush=True)
 
 
 def get_user_curriculum(email: str) -> dict:
