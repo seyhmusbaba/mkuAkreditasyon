@@ -928,21 +928,21 @@ def admin_update_course():
     semester = request.form.get("semester", "")
     akts = request.form.get("akts", "")
     course_type = request.form.get("course_type", "")
-    bologna_link = request.form.get("bologna_link", "")
+    bologna_link = request.form.get("bologna_link", "").strip()
     
     if not course_code:
         return jsonify({"error": "Ders kodu zorunlu"}), 400
     
     email = _get_email()
     
-    # None değerleri atlayarak güncelle
+    # None değerleri atlayarak güncelle (bologna_link boş string de olabilir)
     success = auth.update_course(
         course_code,
         course_name if course_name else None,
         int(semester) if semester else None,
         int(akts) if akts else None,
         course_type if course_type else None,
-        bologna_link if bologna_link is not None else None,
+        bologna_link,  # Boş string de kabul et (link silme için)
         email
     )
     
