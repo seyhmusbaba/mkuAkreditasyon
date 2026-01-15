@@ -408,6 +408,13 @@ def api_get_course_data(course_code):
     
     data = auth.get_course_data(course_code)
     if data:
+        # Bölüm adını al
+        dept_id = data.get('department_id', '')
+        dept_name = ""
+        if dept_id:
+            dept = auth.get_department(dept_id)
+            dept_name = dept.get('name', '') if dept else ''
+        
         # Frontend'in beklediği format: doğrudan alanlar
         return jsonify({
             "success": True,
@@ -420,6 +427,8 @@ def api_get_course_data(course_code):
             "curriculum_text": data.get('curriculum_text', ''),
             "bologna_link": data.get('bologna_link', ''),
             "course_name": data.get('course_name', ''),
+            "department_id": dept_id,
+            "department_name": dept_name,
         })
     return jsonify({"success": False, "error": "Ders bulunamadı"}), 404
 
@@ -841,6 +850,27 @@ def api_department_pea_poc(dept_id):
         })
     except Exception as e:
         print(f"api_department_pea_poc error: {e}", file=sys.stderr)
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/department-info/<dept_id>", methods=["GET"])
+def api_department_info(dept_id):
+    """Bölüm bilgilerini getir"""
+    try:
+        dept = auth.get_department(dept_id)
+        if dept:
+            return jsonify({
+                "success": True,
+                "department_id": dept_id,
+                "name": dept.get('name', ''),
+                "faculty": dept.get('faculty', ''),
+                "bologna_courses_url": dept.get('bologna_courses_url', ''),
+                "bologna_pea_url": dept.get('bologna_pea_url', ''),
+                "bologna_poc_url": dept.get('bologna_poc_url', ''),
+            })
+        return jsonify({"success": False, "error": "Bölüm bulunamadı"})
+    except Exception as e:
+        print(f"api_department_info error: {e}", file=sys.stderr)
         return jsonify({"success": False, "error": str(e)})
 
 
