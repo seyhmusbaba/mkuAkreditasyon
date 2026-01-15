@@ -3011,16 +3011,16 @@ def parse_docs(text: str) -> List[Dict[str, str]]:
         parts = _smart_split(ln, 2)
         
         if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
-            # Normal format: ID | Text
-            did = parts[0].strip()
+            # Normal format: ID | Text - ID'yi normalize et
+            did = parts[0].strip().rstrip('.-: ')
             txt = parts[1].strip()
         else:
             # Sadece metin var, ID otomatik oluştur
-            # Eğer satır "DÖÇ1" veya "DOC1" gibi başlıyorsa, onu ID olarak kullan
+            # Eğer satır "DÖÇ1" veya "DOC1" veya "DÖÇ1." gibi başlıyorsa, onu ID olarak kullan
             import re
-            match = re.match(r'^(DÖÇ\d+|DOC\d+|D\d+)', ln.strip(), re.IGNORECASE)
+            match = re.match(r'^(DÖÇ\d+\.?|DOC\d+\.?|D\d+\.?)', ln.strip(), re.IGNORECASE)
             if match:
-                did = match.group(1).upper()
+                did = match.group(1).upper().rstrip('.-: ')
                 txt = ln.strip()[len(match.group(1)):].strip(' .-:')
                 if not txt:
                     txt = f"Öğrenme Çıktısı {did}"
@@ -3033,6 +3033,14 @@ def parse_docs(text: str) -> List[Dict[str, str]]:
             out.append({"id": did, "text": txt})
     return out
 
+def normalize_id(id_str: str) -> str:
+    """ID'leri normalize et - sonundaki nokta, boşluk, tire temizle"""
+    if not id_str:
+        return ""
+    # Sonundaki nokta, boşluk, tire, iki nokta temizle
+    normalized = id_str.strip().rstrip('.-: ')
+    return normalized
+
 def parse_pocs(text: str) -> List[Dict[str, str]]:
     out = []
     counter = 1
@@ -3043,13 +3051,14 @@ def parse_pocs(text: str) -> List[Dict[str, str]]:
         parts = _smart_split(ln, 2)
         
         if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
-            pid = parts[0].strip()
+            pid = normalize_id(parts[0].strip())
             txt = parts[1].strip()
         else:
             import re
-            match = re.match(r'^(PÖÇ\d+|POC\d+|P\d+)', ln.strip(), re.IGNORECASE)
+            # PÖÇ1, PÖÇ1., POC1, P1 formatlarını destekle
+            match = re.match(r'^(PÖÇ\d+\.?|POC\d+\.?|P\d+\.?)', ln.strip(), re.IGNORECASE)
             if match:
-                pid = match.group(1).upper()
+                pid = normalize_id(match.group(1).upper())
                 txt = ln.strip()[len(match.group(1)):].strip(' .-:')
                 if not txt:
                     txt = f"Program Çıktısı {pid}"
@@ -3072,13 +3081,14 @@ def parse_peas(text: str) -> List[Dict[str, str]]:
         parts = _smart_split(ln, 2)
         
         if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
-            aid = parts[0].strip()
+            aid = normalize_id(parts[0].strip())
             txt = parts[1].strip()
         else:
             import re
-            match = re.match(r'^(PEA\d+|A\d+)', ln.strip(), re.IGNORECASE)
+            # PEA1, PEA1., A1 formatlarını destekle
+            match = re.match(r'^(PEA\d+\.?|A\d+\.?)', ln.strip(), re.IGNORECASE)
             if match:
-                aid = match.group(1).upper()
+                aid = normalize_id(match.group(1).upper())
                 txt = ln.strip()[len(match.group(1)):].strip(' .-:')
                 if not txt:
                     txt = f"Eğitim Amacı {aid}"
@@ -3416,7 +3426,11 @@ def parse_generic_map(text: str, label: str) -> Dict[str, List[str]]:
     mapping = {}
     for ln in _lines_to_list(text):
         key, rest = _split_required(ln, "|", 2, label)
-        mapping[key] = [p.strip() for p in rest.split(",") if p.strip()]
+        # Key'i normalize et (sonundaki nokta, boşluk temizle)
+        normalized_key = normalize_id(key)
+        # Value'ları da normalize et
+        values = [normalize_id(p.strip()) for p in rest.split(",") if p.strip()]
+        mapping[normalized_key] = values
     return mapping
 
 def parse_question_map(text: str) -> Dict[str, Any]:
