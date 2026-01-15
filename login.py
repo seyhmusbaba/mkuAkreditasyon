@@ -831,58 +831,107 @@ def fetch_courses_from_bologna(url: str, dept_id: str, updated_by: str = "") -> 
     
     try:
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'tr-TR,tr;q=0.9,en;q=0.8',
         }
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=headers, timeout=30, verify=True)
         response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, 'html.parser')
+        html_content = response.text
+        soup = BeautifulSoup(html_content, 'html.parser')
         
         courses = []
-        tables = soup.find_all('table')
+        debug_info = {"tables_found": 0, "rows_checked": 0, "html_length": len(html_content)}
         
+        # Tüm tabloları bul
+        tables = soup.find_all('table')
+        debug_info["tables_found"] = len(tables)
+        
+        # Yöntem 1: Standart tablo yapısı
         for table in tables:
             rows = table.find_all('tr')
             for row in rows:
+                debug_info["rows_checked"] += 1
                 cells = row.find_all(['td', 'th'])
-                if len(cells) >= 4:
-                    # Tipik Bologna tablosu: Kod | Ad | AKTS | Tür
-                    code_text = cells[0].get_text(strip=True)
-                    name_text = cells[1].get_text(strip=True)
+                
+                if len(cells) >= 2:
+                    # Her hücredeki metni al
+                    cell_texts = [c.get_text(strip=True) for c in cells]
                     
-                    # Ders kodu formatı kontrolü (örn: 1403101)
-                    if code_text and name_text and code_text[0].isdigit():
-                        akts = 5
-                        course_type = "Z"
-                        semester = 1
-                        
+                    # Ders kodu bul - 7 haneli sayı veya harf+sayı kombinasyonu
+                    code_text = None
+                    name_text = None
+                    akts = 5
+                    course_type = "Z"
+                    semester = 1
+                    
+                    for i, text in enumerate(cell_texts):
+                        # Ders kodu kontrolü (7 haneli sayı veya ABC123 formatı)
+                        import re
+                        if re.match(r'^\d{6,8}$', text) or re.match(r'^[A-ZİĞÜŞÖÇ]{2,4}\d{3,4}$', text, re.IGNORECASE):
+                            code_text = text
+                            # Sonraki hücre muhtemelen ders adı
+                            if i + 1 < len(cell_texts) and len(cell_texts[i + 1]) > 3:
+                                name_text = cell_texts[i + 1]
+                            break
+                    
+                    # Ders adı bulunamadıysa, en uzun metni al
+                    if code_text and not name_text:
+                        longest = max(cell_texts, key=len)
+                        if longest != code_text and len(longest) > 5:
+                            name_text = longest
+                    
+                    if code_text and name_text:
                         # AKTS bulmaya çalış
-                        for cell in cells[2:]:
-                            text = cell.get_text(strip=True)
+                        for text in cell_texts:
                             if text.isdigit() and 1 <= int(text) <= 30:
                                 akts = int(text)
                                 break
                         
-                        # Tür bulmaya çalış (Z=Zorunlu, S=Seçmeli)
-                        for cell in cells:
-                            text = cell.get_text(strip=True).upper()
-                            if text in ['Z', 'S', 'ZORUNLU', 'SEÇMELİ']:
-                                course_type = 'Z' if text in ['Z', 'ZORUNLU'] else 'S'
+                        # Tür bulmaya çalış
+                        for text in cell_texts:
+                            text_upper = text.upper()
+                            if text_upper in ['Z', 'S', 'ZORUNLU', 'SEÇMELİ', 'COMPULSORY', 'ELECTIVE']:
+                                course_type = 'Z' if text_upper in ['Z', 'ZORUNLU', 'COMPULSORY'] else 'S'
                                 break
                         
-                        # Yarıyıl bulmaya çalış (ders kodundan)
-                        if len(code_text) >= 6:
+                        # Yarıyıl bulmaya çalış
+                        if len(code_text) >= 6 and code_text[0].isdigit():
                             try:
                                 sem_digit = int(code_text[4]) if code_text[4].isdigit() else 1
                                 semester = sem_digit if 1 <= sem_digit <= 8 else 1
                             except:
                                 pass
                         
+                        # Duplicate kontrolü
+                        if not any(c['code'] == code_text for c in courses):
+                            courses.append({
+                                'code': code_text,
+                                'name': name_text,
+                                'akts': akts,
+                                'type': course_type,
+                                'semester': semester
+                            })
+        
+        # Yöntem 2: Link içindeki ders kodlarını ara (tabloda değilse)
+        if not courses:
+            links = soup.find_all('a', href=True)
+            for link in links:
+                href = link.get('href', '')
+                text = link.get_text(strip=True)
+                
+                import re
+                # URL'de ders kodu arama
+                code_match = re.search(r'curCourse=(\d{6,8})', href)
+                if code_match and text and len(text) > 5:
+                    code = code_match.group(1)
+                    if not any(c['code'] == code for c in courses):
                         courses.append({
-                            'code': code_text,
-                            'name': name_text,
-                            'akts': akts,
-                            'type': course_type,
-                            'semester': semester
+                            'code': code,
+                            'name': text,
+                            'akts': 5,
+                            'type': 'Z',
+                            'semester': 1
                         })
         
         # Dersleri veritabanına ekle
@@ -896,11 +945,13 @@ def fetch_courses_from_bologna(url: str, dept_id: str, updated_by: str = "") -> 
             "success": True,
             "courses": courses,
             "total": len(courses),
-            "added": added
+            "added": added,
+            "debug": debug_info
         }
         
     except Exception as e:
-        return {"success": False, "error": str(e), "courses": []}
+        import traceback
+        return {"success": False, "error": str(e), "traceback": traceback.format_exc(), "courses": []}
 
 
 def update_course_bologna_link(course_code: str, bologna_link: str, updated_by: str):
@@ -2617,8 +2668,8 @@ def render_profile(user: dict, message_block: str = "") -> str:
       
       <div class="grid-2">
         <div class="form-group">
-          <label>Program</label>
-          <input type="text" value="{user.get('program_name', 'Siyaset Bilimi ve Kamu Yönetimi')}" readonly class="readonly">
+          <label>Program (Bölüm)</label>
+          <input type="text" id="displayProgramName" value="{user.get('program_name', 'Siyaset Bilimi ve Kamu Yönetimi')}" readonly class="readonly">
         </div>
         <div class="form-group">
           <label>Dönem</label>
@@ -2629,11 +2680,11 @@ def render_profile(user: dict, message_block: str = "") -> str:
       <div class="grid-2">
         <div class="form-group">
           <label>Ders Kodu</label>
-          <input type="text" value="{course_code or '-'}" readonly class="readonly">
+          <input type="text" id="displayCourseCode" value="{course_code or '-'}" readonly class="readonly">
         </div>
         <div class="form-group">
           <label>Ders Adı</label>
-          <input type="text" value="{course_name or '-'}" readonly class="readonly">
+          <input type="text" id="displayCourseName" value="{course_name or '-'}" readonly class="readonly">
         </div>
       </div>
     </div>
@@ -2678,8 +2729,8 @@ def render_profile(user: dict, message_block: str = "") -> str:
           </div>
           <div class="form-group">
             <label>PEA (Program Eğitim Amaçları) {'🔒' if not can_edit_program else ''}</label>
-            <textarea name="pea_text" {readonly_program} class="{readonly_class_program}" placeholder="PEA1.&#10;PEA2.&#10;...">{course_data.get('pea_text', '')}</textarea>
-            <div class="helper">{'Sadece Dekan/BB düzenleyebilir' if not can_edit_program else 'Kolay format: PEA1. veya PEA1 | Açıklama'}</div>
+            <textarea name="pea_text" {readonly_program} class="{readonly_class_program}" placeholder="1. Birinci eğitim amacı&#10;2. İkinci eğitim amacı&#10;3. Üçüncü eğitim amacı">{course_data.get('pea_text', '')}</textarea>
+            <div class="helper">{'Sadece Dekan/BB düzenleyebilir' if not can_edit_program else '✨ Kolay giriş: Her satıra bir madde yazın (1. 2. 3. veya PEA1. PEA2.)'}</div>
           </div>
         </div>
         
@@ -2688,13 +2739,13 @@ def render_profile(user: dict, message_block: str = "") -> str:
         <div class="grid-2">
           <div class="form-group">
             <label>PÖÇ (Program Öğrenim Çıktıları) {'🔒' if not can_edit_program else ''}</label>
-            <textarea name="poc_text" {readonly_program} class="{readonly_class_program}" placeholder="PÖÇ1.&#10;PÖÇ2.&#10;...">{course_data.get('poc_text', '')}</textarea>
-            <div class="helper">{'Sadece Dekan/BB düzenleyebilir' if not can_edit_program else 'Kolay format: PÖÇ1. veya PÖÇ1 | Açıklama'}</div>
+            <textarea name="poc_text" {readonly_program} class="{readonly_class_program}" placeholder="1. Birinci program çıktısı&#10;2. İkinci program çıktısı&#10;3. Üçüncü program çıktısı">{course_data.get('poc_text', '')}</textarea>
+            <div class="helper">{'Sadece Dekan/BB düzenleyebilir' if not can_edit_program else '✨ Kolay giriş: Her satıra bir madde yazın (1. 2. 3. veya PÖÇ1. PÖÇ2.)'}</div>
           </div>
           <div class="form-group">
             <label>DÖÇ (Ders Öğrenim Çıktıları)</label>
-            <textarea name="doc_text" placeholder="DÖÇ1.&#10;DÖÇ2.&#10;...">{course_data.get('doc_text', '')}</textarea>
-            <div class="helper">Kolay format: DÖÇ1. veya DÖÇ1 | Açıklama</div>
+            <textarea name="doc_text" placeholder="1. Birinci ders çıktısı&#10;2. İkinci ders çıktısı&#10;3. Üçüncü ders çıktısı">{course_data.get('doc_text', '')}</textarea>
+            <div class="helper">✨ Kolay giriş: Her satıra bir madde yazın (1. 2. 3. veya DÖÇ1. DÖÇ2.)</div>
           </div>
         </div>
         
@@ -2745,6 +2796,29 @@ def render_profile(user: dict, message_block: str = "") -> str:
             document.querySelector('[name="poc_text"]').value = data.poc_text || '';
             document.querySelector('[name="doc_text"]').value = data.doc_text || '';
             document.querySelector('[name="curriculum_text"]').value = data.curriculum_text || '';
+            
+            // Program, ders kodu ve ders adı alanlarını güncelle
+            const progEl = document.getElementById('displayProgramName');
+            const codeEl = document.getElementById('displayCourseCode');
+            const nameEl = document.getElementById('displayCourseName');
+            
+            if (codeEl) codeEl.value = courseCode;
+            if (nameEl) nameEl.value = data.course_name || '-';
+            
+            // Bölüm adını al
+            if (data.department_name) {{
+              if (progEl) progEl.value = data.department_name;
+            }} else if (data.department_id) {{
+              // department_id varsa, bölüm adını API'den çek
+              fetch('/api/department-info/' + data.department_id)
+                .then(r => r.json())
+                .then(deptData => {{
+                  if (deptData.name && progEl) {{
+                    progEl.value = deptData.name;
+                  }}
+                }})
+                .catch(() => {{}});
+            }}
             
             // Cookie'yi güncelle - ana sayfanın doğru ders kodunu okuması için
             try {{
@@ -3010,12 +3084,14 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
               
               <div class="form-group">
                 <label>🎯 PEA (Program Eğitim Amaçları)</label>
-                <textarea name="peas_text" placeholder="PEA1.&#10;PEA2.&#10;...">{dept_pea}</textarea>
+                <textarea name="peas_text" placeholder="1. Birinci eğitim amacı&#10;2. İkinci eğitim amacı&#10;3. Üçüncü eğitim amacı">{dept_pea}</textarea>
+                <div class="helper" style="font-size:0.75rem;color:#64748b;margin-top:0.25rem;">✨ Kolay giriş: Her satıra bir madde yazın</div>
               </div>
               
               <div class="form-group">
                 <label>📗 PÖÇ (Program Öğrenim Çıktıları)</label>
-                <textarea name="pocs_text" placeholder="PÖÇ1.&#10;PÖÇ2.&#10;...">{dept_poc}</textarea>
+                <textarea name="pocs_text" placeholder="1. Birinci program çıktısı&#10;2. İkinci program çıktısı&#10;3. Üçüncü program çıktısı">{dept_poc}</textarea>
+                <div class="helper" style="font-size:0.75rem;color:#64748b;margin-top:0.25rem;">✨ Kolay giriş: Her satıra bir madde yazın</div>
               </div>
               
               <div style="display:flex; gap:0.5rem;">
@@ -3938,13 +4014,28 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
         body: formData
       }}).then(r => r.json()).then(data => {{
         if (data.success) {{
-          showNotification('Toplam ' + data.total + ' ders bulundu, ' + data.added + ' yeni ders eklendi!', 'success');
-          loadDepartmentCourses(deptId);
+          if (data.total === 0) {{
+            // Debug bilgisini göster
+            let debugMsg = 'Hiç ders bulunamadı.';
+            if (data.debug) {{
+              debugMsg += '\\n\\nDebug: ' + data.debug.tables_found + ' tablo, ' + data.debug.rows_checked + ' satır kontrol edildi.';
+              debugMsg += '\\nHTML boyutu: ' + data.debug.html_length + ' karakter';
+            }}
+            showNotification(debugMsg, 'warning');
+          }} else {{
+            showNotification('Toplam ' + data.total + ' ders bulundu, ' + data.added + ' yeni ders eklendi!', 'success');
+            loadDepartmentCourses(deptId);
+          }}
         }} else {{
-          showNotification('Hata: ' + (data.error || 'Dersler çekilemedi'), 'error');
+          let errorMsg = data.error || 'Dersler çekilemedi';
+          if (data.traceback) {{
+            console.error('Bologna fetch error:', data.traceback);
+          }}
+          showNotification('Hata: ' + errorMsg, 'error');
         }}
       }}).catch(err => {{
-        showNotification('Bağlantı hatası!', 'error');
+        console.error('Bologna fetch connection error:', err);
+        showNotification('Bağlantı hatası! Konsolu kontrol edin.', 'error');
       }});
     }}
     
