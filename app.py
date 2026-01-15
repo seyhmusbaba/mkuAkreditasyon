@@ -635,6 +635,7 @@ def admin_add_user():
     password = request.form.get("password", "")
     full_name = request.form.get("full_name", "").strip()
     role = request.form.get("role", "ogretim_elemani")
+    department_id = request.form.get("department_id", "").strip()
     
     if not email or not password:
         return jsonify({"error": "E-posta ve şifre zorunlu"}), 400
@@ -648,7 +649,7 @@ def admin_add_user():
     if role not in auth.ROLES:
         return jsonify({"error": "Geçersiz rol"}), 400
     
-    success = auth.add_user(email, password, full_name, role)
+    success = auth.add_user(email, password, full_name, role, department_id if department_id else None)
     if success:
         return jsonify({"success": True})
     else:
@@ -824,6 +825,62 @@ def api_all_department_courses(dept_id):
         return jsonify({"courses": by_semester, "department_id": dept_id, "total": len(courses)})
     except Exception as e:
         print(f"api_all_department_courses error: {e}", file=sys.stderr)
+        return jsonify({"courses": {}, "error": str(e)})
+
+
+@app.route("/api/department-pea-poc/<dept_id>", methods=["GET"])
+def api_department_pea_poc(dept_id):
+    """Bölümün PEA ve PÖÇ verilerini getir"""
+    try:
+        dept_data = auth.get_department_data(dept_id)
+        return jsonify({
+            "success": True,
+            "pea_text": dept_data.get('peas_text', ''),
+            "poc_text": dept_data.get('pocs_text', ''),
+            "department_id": dept_id
+        })
+    except Exception as e:
+        print(f"api_department_pea_poc error: {e}", file=sys.stderr)
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/all-courses", methods=["GET"])
+def api_all_courses():
+    """Tüm dersleri bölümlere göre gruplu getir"""
+    try:
+        all_courses = auth.get_all_courses_data()
+        departments = auth.get_all_departments()
+        
+        # Bölüm adları
+        dept_names = {d.get('department_id'): d.get('name') for d in departments}
+        dept_names['diger'] = 'Diğer'
+        dept_names[None] = 'Diğer'
+        dept_names[''] = 'Diğer'
+        
+        # Dersleri bölüme göre grupla
+        courses_by_dept = {}
+        for c in all_courses:
+            dept_id = c.get('department_id') or 'diger'
+            if dept_id not in courses_by_dept:
+                courses_by_dept[dept_id] = []
+            courses_by_dept[dept_id].append({
+                'code': c.get('course_code', ''),
+                'name': c.get('course_name', ''),
+                'semester': c.get('semester', 0),
+                'akts': c.get('akts', 5)
+            })
+        
+        # Her bölümü sırala
+        for dept_id in courses_by_dept:
+            courses_by_dept[dept_id].sort(key=lambda x: (x.get('semester', 0), x.get('code', '')))
+        
+        return jsonify({
+            "courses": courses_by_dept,
+            "dept_names": dept_names,
+            "total": len(all_courses)
+        })
+    except Exception as e:
+        print(f"api_all_courses error: {e}", file=sys.stderr)
         return jsonify({"courses": {}, "error": str(e)})
 
 
@@ -1991,7 +2048,12 @@ def compute():
             overall_pct = result.get("computed", {}).get("overall", {}).get("success_pct", 0)
             user_name = user_info.get("full_name", "").strip() or email.split("@")[0]
             title = f"{datetime.now().strftime('%d.%m.%Y %H:%M')} - {user_name}"
-            auth.save_report(email, title, json.dumps(payload, ensure_ascii=False), json.dumps(result, ensure_ascii=False), overall_pct)
+            
+            # Bölüm ve ders bilgilerini al
+            report_dept_id = values.get("department_id") or user_info.get("department_id", "")
+            report_course_code = values.get("course_code") or user_info.get("course_code", "")
+            
+            auth.save_report(email, title, json.dumps(payload, ensure_ascii=False), json.dumps(result, ensure_ascii=False), overall_pct, report_dept_id, report_course_code)
             reports = auth.get_report_history(email)
             
             # Kullanıcının eşleştirme ve soru verilerini kaydet (sonraki girişlerde otomatik yüklenecek)
