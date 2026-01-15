@@ -3848,7 +3848,7 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
           }}
           
           let html = '<table style="width:100%; border-collapse:collapse; font-size:0.85rem;">';
-          html += '<thead><tr style="background:#e2e8f0;"><th style="padding:0.5rem; text-align:left;">Yarıyıl</th><th style="padding:0.5rem; text-align:left;">Kod</th><th style="padding:0.5rem; text-align:left;">Ders Adı</th><th style="padding:0.5rem; text-align:center;">AKTS</th><th style="padding:0.5rem; text-align:center;">İşlem</th></tr></thead>';
+          html += '<thead><tr style="background:#e2e8f0;"><th style="padding:0.5rem; text-align:left;">YY</th><th style="padding:0.5rem; text-align:left;">Kod</th><th style="padding:0.5rem; text-align:left;">Ders Adı</th><th style="padding:0.5rem; text-align:center;">AKTS</th><th style="padding:0.5rem; text-align:left;">Bologna Link</th><th style="padding:0.5rem; text-align:center;">İşlem</th></tr></thead>';
           html += '<tbody>';
           
           // Yarıyıla göre sırala
@@ -3856,13 +3856,16 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
           for (const sem of semesters) {{
             const semCourses = courses[sem];
             for (const c of semCourses) {{
-              html += '<tr style="border-bottom:1px solid #e2e8f0;">';
-              html += '<td style="padding:0.5rem;">' + sem + '. Yarıyıl</td>';
-              html += '<td style="padding:0.5rem; font-weight:600;">' + c.code + '</td>';
-              html += '<td style="padding:0.5rem;">' + c.name + '</td>';
-              html += '<td style="padding:0.5rem; text-align:center;">' + c.akts + '</td>';
-              html += '<td style="padding:0.5rem; text-align:center;">';
-              html += '<button onclick="deleteCourseFromDept(\\'' + c.code + '\\', \\'' + deptId + '\\')" class="btn-icon" title="Sil" style="color:#dc2626; border:none; background:none; cursor:pointer;">🗑️</button>';
+              const safeCode = c.code.replace(/'/g, "\\\\'");
+              html += '<tr style="border-bottom:1px solid #e2e8f0;" id="course-row-' + c.code + '">';
+              html += '<td style="padding:0.4rem; width:40px;">' + sem + '</td>';
+              html += '<td style="padding:0.4rem; font-weight:600; width:80px;">' + c.code + '</td>';
+              html += '<td style="padding:0.4rem;"><input type="text" id="course-name-' + c.code + '" value="' + (c.name || '').replace(/"/g, '&quot;') + '" style="width:100%; padding:0.3rem; border:1px solid #e2e8f0; border-radius:4px; font-size:0.8rem;"></td>';
+              html += '<td style="padding:0.4rem; width:60px;"><input type="number" id="course-akts-' + c.code + '" value="' + (c.akts || 5) + '" min="1" max="30" style="width:100%; padding:0.3rem; border:1px solid #e2e8f0; border-radius:4px; font-size:0.8rem; text-align:center;"></td>';
+              html += '<td style="padding:0.4rem;"><input type="url" id="course-link-' + c.code + '" value="' + (c.bologna_link || '').replace(/"/g, '&quot;') + '" placeholder="Bologna URL" style="width:100%; padding:0.3rem; border:1px solid #e2e8f0; border-radius:4px; font-size:0.75rem;"></td>';
+              html += '<td style="padding:0.4rem; text-align:center; width:80px; white-space:nowrap;">';
+              html += '<button onclick="saveCourseUpdate(\\'' + safeCode + '\\', \\'' + deptId + '\\')" class="btn-icon" title="Kaydet" style="color:#059669; border:none; background:none; cursor:pointer; font-size:1rem;">💾</button>';
+              html += '<button onclick="deleteCourseFromDept(\\'' + safeCode + '\\', \\'' + deptId + '\\')" class="btn-icon" title="Sil" style="color:#dc2626; border:none; background:none; cursor:pointer; font-size:1rem;">🗑️</button>';
               html += '</td>';
               html += '</tr>';
             }}
@@ -3876,6 +3879,42 @@ def render_admin_panel(message_block: str = "", current_user: dict = None) -> st
         .catch(err => {{
           container.innerHTML = '<p style="padding:1rem; color:#dc2626;">Bağlantı hatası</p>';
         }});
+    }}
+    
+    function saveCourseUpdate(courseCode, deptId) {{
+      const name = document.getElementById('course-name-' + courseCode)?.value || '';
+      const akts = document.getElementById('course-akts-' + courseCode)?.value || '5';
+      const link = document.getElementById('course-link-' + courseCode)?.value || '';
+      
+      if (!name.trim()) {{
+        showNotification('Ders adı boş olamaz!', 'error');
+        return;
+      }}
+      
+      const formData = new FormData();
+      formData.append('course_code', courseCode);
+      formData.append('course_name', name.trim());
+      formData.append('akts', akts);
+      formData.append('bologna_link', link.trim());
+      
+      fetch('/admin/update-course', {{
+        method: 'POST',
+        body: formData
+      }}).then(r => r.json()).then(data => {{
+        if (data.success) {{
+          showNotification('Ders güncellendi!', 'success');
+          // Satırı yeşil yap kısa süreliğine
+          const row = document.getElementById('course-row-' + courseCode);
+          if (row) {{
+            row.style.backgroundColor = '#dcfce7';
+            setTimeout(() => {{ row.style.backgroundColor = ''; }}, 1500);
+          }}
+        }} else {{
+          showNotification('Hata: ' + (data.error || 'Güncelleme başarısız'), 'error');
+        }}
+      }}).catch(() => {{
+        showNotification('Bağlantı hatası!', 'error');
+      }});
     }}
     
     function fetchCoursesFromBologna(deptId, url) {{
