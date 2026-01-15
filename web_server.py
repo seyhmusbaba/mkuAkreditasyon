@@ -3000,37 +3000,70 @@ def _split_required(line: str, sep: str, count: int, label: str) -> List[str]:
 
 
 def parse_docs(text: str) -> List[Dict[str, str]]:
+    """
+    DÖÇ parse et - çok esnek format desteği
+    Desteklenen formatlar:
+    - DÖÇ1. Metin
+    - DÖÇ1 | Metin
+    - DÖÇ1 - Metin
+    - DÖÇ1: Metin
+    - DOC1. Metin
+    - D1. Metin
+    - 1. Metin (otomatik DÖÇ1 olur)
+    - 1) Metin
+    - Sadece metin (otomatik numara)
+    """
     out = []
     counter = 1
+    import re
+    
     for ln in _lines_to_list(text):
-        # Çok kısa satırları (3 karakterden az) atla
         if len(ln.strip()) < 3:
             continue
         
-        # Önce | veya - ile böl
-        parts = _smart_split(ln, 2)
+        line = ln.strip()
+        did = None
+        txt = None
         
-        if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
-            # Normal format: ID | Text - ID'yi normalize et
+        # Yöntem 1: | ile ayrılmış
+        if "|" in line:
+            parts = line.split("|", 1)
             did = parts[0].strip().rstrip('.-: ')
-            txt = parts[1].strip()
-        else:
-            # Sadece metin var, ID otomatik oluştur
-            # Eğer satır "DÖÇ1" veya "DOC1" veya "DÖÇ1." gibi başlıyorsa, onu ID olarak kullan
-            import re
-            match = re.match(r'^(DÖÇ\d+\.?|DOC\d+\.?|D\d+\.?)', ln.strip(), re.IGNORECASE)
+            txt = parts[1].strip() if len(parts) > 1 else ""
+        
+        # Yöntem 2: DÖÇ1. veya DOC1. veya D1. formatı
+        elif re.match(r'^(DÖÇ|DOC|D)\.?\s*\d+', line, re.IGNORECASE):
+            match = re.match(r'^(DÖÇ|DOC|D)\.?\s*(\d+)[.\-:\s]+(.*)$', line, re.IGNORECASE)
             if match:
-                did = match.group(1).upper().rstrip('.-: ')
-                txt = ln.strip()[len(match.group(1)):].strip(' .-:')
-                if not txt:
-                    txt = f"Öğrenme Çıktısı {did}"
+                num = match.group(2)
+                txt = match.group(3).strip()
+                did = f"DÖÇ{num}"
             else:
-                did = f"DÖÇ{counter}"
-                txt = ln.strip()
-                counter += 1
+                # DÖÇ1 tek başına
+                match2 = re.match(r'^(DÖÇ|DOC|D)\.?\s*(\d+)$', line, re.IGNORECASE)
+                if match2:
+                    num = match2.group(2)
+                    did = f"DÖÇ{num}"
+                    txt = f"Öğrenme Çıktısı {num}"
+        
+        # Yöntem 3: Sadece numara ile başlıyor
+        elif re.match(r'^\d+[.\)\-:\s]', line):
+            match = re.match(r'^(\d+)[.\)\-:\s]+(.*)$', line)
+            if match:
+                num = match.group(1)
+                txt = match.group(2).strip()
+                did = f"DÖÇ{num}"
+        
+        # Yöntem 4: Hiçbiri değilse, otomatik numara ver
+        if not did:
+            did = f"DÖÇ{counter}"
+            txt = line
+            counter += 1
         
         if did and txt:
+            did = did.rstrip('.-: ')  # Normalize
             out.append({"id": did, "text": txt})
+    
     return out
 
 def normalize_id(id_str: str) -> str:
@@ -3042,63 +3075,137 @@ def normalize_id(id_str: str) -> str:
     return normalized
 
 def parse_pocs(text: str) -> List[Dict[str, str]]:
+    """
+    PÖÇ parse et - çok esnek format desteği
+    Desteklenen formatlar:
+    - PÖÇ1. Metin
+    - PÖÇ1 | Metin  
+    - PÖÇ1 - Metin
+    - PÖÇ1: Metin
+    - 1. Metin (otomatik PÖÇ1 olur)
+    - 1) Metin
+    - Sadece metin (otomatik numara)
+    """
     out = []
     counter = 1
+    import re
+    
     for ln in _lines_to_list(text):
         if len(ln.strip()) < 3:
             continue
         
-        parts = _smart_split(ln, 2)
+        line = ln.strip()
+        pid = None
+        txt = None
         
-        if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
+        # Yöntem 1: | ile ayrılmış
+        if "|" in line:
+            parts = line.split("|", 1)
             pid = normalize_id(parts[0].strip())
-            txt = parts[1].strip()
-        else:
-            import re
-            # PÖÇ1, PÖÇ1., POC1, P1 formatlarını destekle
-            match = re.match(r'^(PÖÇ\d+\.?|POC\d+\.?|P\d+\.?)', ln.strip(), re.IGNORECASE)
+            txt = parts[1].strip() if len(parts) > 1 else ""
+        
+        # Yöntem 2: PÖÇ1. veya PÖÇ1: veya PÖÇ1- formatı
+        elif re.match(r'^(PÖÇ|POC|P)\.?\s*\d+', line, re.IGNORECASE):
+            match = re.match(r'^(PÖÇ|POC|P)\.?\s*(\d+)[.\-:\s]+(.*)$', line, re.IGNORECASE)
             if match:
-                pid = normalize_id(match.group(1).upper())
-                txt = ln.strip()[len(match.group(1)):].strip(' .-:')
-                if not txt:
-                    txt = f"Program Çıktısı {pid}"
+                prefix = match.group(1).upper()
+                num = match.group(2)
+                txt = match.group(3).strip()
+                pid = f"PÖÇ{num}" if prefix in ['PÖÇ', 'POC', 'P'] else f"{prefix}{num}"
             else:
-                pid = f"PÖÇ{counter}"
-                txt = ln.strip()
-                counter += 1
+                # PÖÇ1 tek başına (açıklama yok)
+                match2 = re.match(r'^(PÖÇ|POC|P)\.?\s*(\d+)$', line, re.IGNORECASE)
+                if match2:
+                    num = match2.group(2)
+                    pid = f"PÖÇ{num}"
+                    txt = f"Program Çıktısı {num}"
+        
+        # Yöntem 3: Sadece numara ile başlıyor (1. veya 1) veya 1:)
+        elif re.match(r'^\d+[.\)\-:\s]', line):
+            match = re.match(r'^(\d+)[.\)\-:\s]+(.*)$', line)
+            if match:
+                num = match.group(1)
+                txt = match.group(2).strip()
+                pid = f"PÖÇ{num}"
+        
+        # Yöntem 4: Hiçbiri değilse, otomatik numara ver
+        if not pid:
+            pid = f"PÖÇ{counter}"
+            txt = line
+            counter += 1
         
         if pid and txt:
+            # ID'yi normalize et
+            pid = normalize_id(pid)
             out.append({"id": pid, "text": txt})
+    
     return out
 
 def parse_peas(text: str) -> List[Dict[str, str]]:
+    """
+    PEA parse et - çok esnek format desteği
+    Desteklenen formatlar:
+    - PEA1. Metin
+    - PEA1 | Metin
+    - PEA1 - Metin
+    - PEA1: Metin
+    - A1. Metin
+    - 1. Metin (otomatik PEA1 olur)
+    - 1) Metin
+    - Sadece metin (otomatik numara)
+    """
     out = []
     counter = 1
+    import re
+    
     for ln in _lines_to_list(text):
         if len(ln.strip()) < 3:
             continue
         
-        parts = _smart_split(ln, 2)
+        line = ln.strip()
+        aid = None
+        txt = None
         
-        if len(parts) >= 2 and parts[0].strip() and parts[1].strip():
+        # Yöntem 1: | ile ayrılmış
+        if "|" in line:
+            parts = line.split("|", 1)
             aid = normalize_id(parts[0].strip())
-            txt = parts[1].strip()
-        else:
-            import re
-            # PEA1, PEA1., A1 formatlarını destekle
-            match = re.match(r'^(PEA\d+\.?|A\d+\.?)', ln.strip(), re.IGNORECASE)
+            txt = parts[1].strip() if len(parts) > 1 else ""
+        
+        # Yöntem 2: PEA1. veya A1. formatı
+        elif re.match(r'^(PEA|A)\.?\s*\d+', line, re.IGNORECASE):
+            match = re.match(r'^(PEA|A)\.?\s*(\d+)[.\-:\s]+(.*)$', line, re.IGNORECASE)
             if match:
-                aid = normalize_id(match.group(1).upper())
-                txt = ln.strip()[len(match.group(1)):].strip(' .-:')
-                if not txt:
-                    txt = f"Eğitim Amacı {aid}"
+                prefix = match.group(1).upper()
+                num = match.group(2)
+                txt = match.group(3).strip()
+                aid = f"PEA{num}"
             else:
-                aid = f"PEA{counter}"
-                txt = ln.strip()
-                counter += 1
+                # PEA1 tek başına
+                match2 = re.match(r'^(PEA|A)\.?\s*(\d+)$', line, re.IGNORECASE)
+                if match2:
+                    num = match2.group(2)
+                    aid = f"PEA{num}"
+                    txt = f"Eğitim Amacı {num}"
+        
+        # Yöntem 3: Sadece numara ile başlıyor
+        elif re.match(r'^\d+[.\)\-:\s]', line):
+            match = re.match(r'^(\d+)[.\)\-:\s]+(.*)$', line)
+            if match:
+                num = match.group(1)
+                txt = match.group(2).strip()
+                aid = f"PEA{num}"
+        
+        # Yöntem 4: Hiçbiri değilse, otomatik numara ver
+        if not aid:
+            aid = f"PEA{counter}"
+            txt = line
+            counter += 1
         
         if aid and txt:
+            aid = normalize_id(aid)
             out.append({"id": aid, "text": txt})
+    
     return out
 
 def parse_curriculum(text: str) -> List[Dict[str, str]]:
